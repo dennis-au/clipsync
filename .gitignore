@@ -1,0 +1,16 @@
+# Binaries
+/clipsync
+*.exe
+*.test
+*.out
+
+# State / runtime data
+/var/
+items.json
+blobs/
+
+# OS / editor
+.DS_Store
+*.swp
+.idea/
+.vscode/
