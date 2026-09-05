@@ -26,7 +26,7 @@ private final class StatusItemController: NSObject, NSPopoverDelegate {
     init(settings: SettingsStore, status: StatusStore) {
         self.settings = settings
         self.status = status
-        self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         self.settingsWindowController = SettingsWindowController(settings: settings, status: status)
         super.init()
 
@@ -46,7 +46,9 @@ private final class StatusItemController: NSObject, NSPopoverDelegate {
     private func configureStatusItem() {
         guard let button = statusItem.button else { return }
         button.image = LinkedClipsStatusIcon.image
-        button.imagePosition = .imageOnly
+        button.title = "Clip"
+        button.font = .systemFont(ofSize: 12, weight: .medium)
+        button.imagePosition = .imageLeading
         button.imageScaling = .scaleProportionallyDown
         button.target = self
         button.action = #selector(togglePopover(_:))
