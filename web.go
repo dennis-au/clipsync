@@ -6,7 +6,7 @@ const loginHTML = `<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="dark">
-<title>denlab clipboard · sign in</title>
+<title>clipsync · sign in</title>
 <style>
   :root{--canvas:#101412;--surface:#181e1b;--rail:#141a17;--line:#3b463d;--text:#edf2ed;--muted:#aab5ac;--blue:#57ce82;--blue-deep:#41b969;--red:#f0a0a0}
   *{box-sizing:border-box}
@@ -21,7 +21,7 @@ const loginHTML = `<!DOCTYPE html>
 </style>
 </head>
 <body>
-<section class="intro" aria-label="denlab clipboard"><div class="brand"><span class="brand-mark">D</span>denlab clipboard</div><div><h1>Shared work, ready when you are.</h1><p>Private clipboard rooms for text, images, and files.</p></div><small>denlab.xyz</small></section>
+<section class="intro" aria-label="clipsync"><div class="brand"><span class="brand-mark">C</span>clipsync</div><div><h1>Shared work, ready when you are.</h1><p>Private clipboard rooms for text, images, and files.</p></div><small>clipsync</small></section>
 <main class="signin"><form method="POST" action="login"><h2>Sign in</h2><p class="lede">Use the shared workspace password.</p><div class="err"><!--ERR--></div><label for="password">Password</label><input id="password" type="password" name="password" autofocus autocomplete="current-password"><button type="submit">Continue</button></form></main>
 </body>
 </html>`
@@ -32,7 +32,7 @@ const indexHTML = `<!DOCTYPE html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="color-scheme" content="dark light">
-<title>denlab clipboard</title>
+<title>clipsync</title>
 <style>
   :root{--canvas:#f3f5f7;--surface:#fff;--surface-soft:#f9fafb;--rail:#1f2937;--rail-line:#344054;--line:#d8dee6;--line-dark:#b9c3d0;--text:#17212f;--muted:#667085;--subtle:#98a2b3;--blue:#2f6fed;--blue-deep:#245ad0;--blue-soft:#eaf1ff;--green:#159461;--red:#c93d3d;--red-soft:#fff1f1;--amber:#a56a00;--amber-soft:#fff7df}
   *{box-sizing:border-box}body{margin:0;min-width:320px;font:14px/1.45 Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:var(--canvas);color:var(--text)}button,input,textarea{font:inherit}
@@ -65,7 +65,7 @@ const indexHTML = `<!DOCTYPE html>
 <body data-theme="dark">
 <div class="app-shell">
   <main class="workspace">
-    <header class="topbar"><div class="brand"><span class="dot" id="dot"></span>denlab clipboard</div><div class="connection"><span id="status">Connecting...</span><label class="theme-toggle" id="theme-control" title="Switch to light mode"><input id="theme" type="checkbox" checked aria-label="Dark mode"><span class="theme-thumb" aria-hidden="true"></span></label><span class="room-active">Room <strong id="room-name">No room selected</strong></span><span class="sr-only" id="room-summary-status">Choose a room</span></div></header>
+    <header class="topbar"><div class="brand"><span class="dot" id="dot"></span>clipsync</div><div class="connection"><span id="status">Connecting...</span><label class="theme-toggle" id="theme-control" title="Switch to light mode"><input id="theme" type="checkbox" checked aria-label="Dark mode"><span class="theme-thumb" aria-hidden="true"></span></label><span class="room-active">Room <strong id="room-name">No room selected</strong></span><span class="sr-only" id="room-summary-status">Choose a room</span></div></header>
     <div class="workspace-inner">
       <aside class="utility">
         <section class="room-bar" aria-label="Room controls"><label for="room">Room</label><input id="room" placeholder="Room code" autocomplete="off" spellcheck="false" pattern="[A-Za-z0-9._-]+"><button class="button primary" id="join">Open room</button><button class="button" id="rnd" title="Generate a random room code">New room</button><button class="button danger" id="clear" title="Permanently delete this room's contents">Clear room</button></section>
