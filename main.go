@@ -52,6 +52,7 @@ const (
 	defaultMaxUploadsPerRoom       = 4
 	defaultUploadChunkIdleTimeout  = 2 * time.Minute
 	uploadIDBytes                  = 32
+	clearAllConfirmation           = "DELETE ALL CLIPSYNC DATA"
 )
 
 var (
@@ -371,6 +372,7 @@ func (l *limiter) evictOldestLocked() {
 
 type server struct {
 	mu                      sync.Mutex
+	globalMutationMu        sync.RWMutex
 	mutationMu              sync.Mutex
 	persistMu               sync.Mutex
 	rooms                   map[string]*room
@@ -1060,6 +1062,22 @@ func (s *server) persistPath() string { return filepath.Join(s.stateDir, "items.
 
 func (s *server) persistBackupPath() string { return filepath.Join(s.stateDir, "items.json.bak") }
 
+func (s *server) removeSnapshotTemps() error {
+	entries, err := os.ReadDir(s.stateDir)
+	if err != nil {
+		return err
+	}
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), ".items.json-") {
+			continue
+		}
+		if err := os.Remove(filepath.Join(s.stateDir, entry.Name())); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
+}
+
 var errNoPersistedSnapshot = errors.New("no persisted snapshot")
 
 func (s *server) snapshot() map[string][]item {
@@ -1648,6 +1666,32 @@ func (s *server) requireRateLimit(l *limiter, h http.HandlerFunc) http.HandlerFu
 	}
 }
 
+// Administrative controls are intended for the local controller, never the
+// public service reached through a configured reverse-proxy connector.
+func (s *server) requireLocalAdmin(h http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, req *http.Request) {
+		peer := remoteIP(req.RemoteAddr)
+		if peer == nil || !peer.IsLoopback() || s.isTrustedProxy(peer) || !localRequestHost(req.Host) {
+			http.NotFound(w, req)
+			return
+		}
+		h(w, req)
+	}
+}
+
+func localRequestHost(rawHost string) bool {
+	host := rawHost
+	if parsedHost, _, err := net.SplitHostPort(rawHost); err == nil {
+		host = parsedHost
+	}
+	host = strings.Trim(strings.TrimSpace(host), "[]")
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
 func (s *server) clientIdentity(req *http.Request) string {
 	peer := remoteIP(req.RemoteAddr)
 	if peer == nil {
@@ -2219,6 +2263,200 @@ func (s *server) handleClear(w http.ResponseWriter, req *http.Request) {
 	json.NewEncoder(w).Encode(map[string]int{"cleared": cleared})
 }
 
+type clearAllResult struct {
+	Rooms   int `json:"rooms"`
+	Items   int `json:"items"`
+	Uploads int `json:"uploads"`
+}
+
+type roomDataSummary struct {
+	Name  string `json:"name"`
+	Items int    `json:"items"`
+	Bytes int64  `json:"bytes"`
+}
+
+func (s *server) handleAdminRooms(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodGet {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+
+	s.globalMutationMu.RLock()
+	defer s.globalMutationMu.RUnlock()
+	s.mu.Lock()
+	rooms := make(map[string]*room, len(s.rooms))
+	for name, r := range s.rooms {
+		rooms[name] = r
+	}
+	s.mu.Unlock()
+
+	summaries := make([]roomDataSummary, 0, len(rooms))
+	for name, r := range rooms {
+		items := r.list()
+		if len(items) == 0 {
+			continue
+		}
+		var storedBytes int64
+		for _, it := range items {
+			storedBytes += it.Size
+		}
+		summaries = append(summaries, roomDataSummary{Name: name, Items: len(items), Bytes: storedBytes})
+	}
+	sort.Slice(summaries, func(i, j int) bool { return summaries[i].Name < summaries[j].Name })
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"rooms": summaries})
+}
+
+func (s *server) handleDeleteRooms(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var input struct {
+		Rooms []string `json:"rooms"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(w, req.Body, 16<<10))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&input); err != nil {
+		http.Error(w, "invalid room selection", http.StatusBadRequest)
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		http.Error(w, "invalid room selection", http.StatusBadRequest)
+		return
+	}
+	if len(input.Rooms) == 0 || len(input.Rooms) > s.maxRooms {
+		http.Error(w, "invalid room selection", http.StatusBadRequest)
+		return
+	}
+	selected := make(map[string]struct{}, len(input.Rooms))
+	for _, name := range input.Rooms {
+		if !validRoomName(name, s.maxRoomNameBytes) {
+			http.Error(w, "invalid room selection", http.StatusBadRequest)
+			return
+		}
+		selected[name] = struct{}{}
+	}
+
+	s.globalMutationMu.Lock()
+	defer s.globalMutationMu.Unlock()
+	s.mutationMu.Lock()
+	defer s.mutationMu.Unlock()
+
+	s.mu.Lock()
+	rooms := make(map[string]*room, len(selected))
+	for name := range selected {
+		if r := s.rooms[name]; r != nil {
+			rooms[name] = r
+		}
+	}
+	uploads := make([]*upload, 0)
+	for id, u := range s.uploads {
+		if _, ok := selected[u.room]; ok {
+			s.detachUploadLocked(id, u)
+			uploads = append(uploads, u)
+		}
+	}
+	s.mu.Unlock()
+
+	result := clearAllResult{Uploads: len(uploads)}
+	for name, r := range rooms {
+		removed := r.clear()
+		if len(removed) > 0 {
+			result.Rooms++
+			result.Items += len(removed)
+			s.queueRemovals(name, removed)
+		}
+		s.removeEmptyRoom(name, r)
+	}
+	for _, u := range uploads {
+		s.discardUpload(u)
+	}
+	if !s.persistMutation(w, "selected room clear") {
+		return
+	}
+	if err := s.removeSnapshotTemps(); err != nil {
+		http.Error(w, "rooms cleared but temporary snapshot cleanup failed", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
+}
+
+func (s *server) handleClearAll(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	if subtle.ConstantTimeCompare([]byte(req.Header.Get("X-Clipsync-Confirm")), []byte(clearAllConfirmation)) != 1 {
+		http.Error(w, "confirmation required", http.StatusBadRequest)
+		return
+	}
+
+	// Wait for in-flight mutations and keep new uploads or pushes outside the
+	// interval between the empty metadata snapshot and physical file deletion.
+	s.globalMutationMu.Lock()
+	defer s.globalMutationMu.Unlock()
+	s.mutationMu.Lock()
+	defer s.mutationMu.Unlock()
+
+	s.mu.Lock()
+	rooms := make(map[string]*room, len(s.rooms))
+	for name, r := range s.rooms {
+		rooms[name] = r
+	}
+	uploads := make([]*upload, 0, len(s.uploads))
+	for _, u := range s.uploads {
+		uploads = append(uploads, u)
+	}
+	s.uploads = map[string]*upload{}
+	s.uploadsByClient = map[string]int{}
+	s.uploadsByRoom = map[string]int{}
+	s.mu.Unlock()
+
+	result := clearAllResult{Uploads: len(uploads)}
+	for name, r := range rooms {
+		removed := r.clear()
+		if len(removed) > 0 {
+			result.Rooms++
+			result.Items += len(removed)
+			s.queueRemovals(name, removed)
+		}
+		s.removeEmptyRoom(name, r)
+	}
+	for _, u := range uploads {
+		s.discardUpload(u)
+	}
+
+	if !s.persistMutation(w, "global clear") {
+		return
+	}
+	if err := os.RemoveAll(filepath.Join(s.stateDir, "blobs")); err != nil {
+		http.Error(w, "metadata cleared but blob cleanup failed", http.StatusInternalServerError)
+		return
+	}
+	s.pendingRemovals = nil
+	if err := os.RemoveAll(s.uploadDir()); err != nil {
+		http.Error(w, "metadata cleared but upload cleanup failed", http.StatusInternalServerError)
+		return
+	}
+	if err := os.MkdirAll(s.uploadDir(), 0700); err != nil {
+		http.Error(w, "metadata cleared but upload staging could not be restored", http.StatusInternalServerError)
+		return
+	}
+	if err := s.removeSnapshotTemps(); err != nil {
+		http.Error(w, "metadata cleared but temporary snapshot cleanup failed", http.StatusInternalServerError)
+		return
+	}
+	atomic.StoreInt64(&totalBytes, 0)
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(result)
+}
+
 func (s *server) handleItem(w http.ResponseWriter, req *http.Request) {
 	rm, roomOK := s.requestRoom(w, req)
 	id := req.URL.Query().Get("id")
@@ -2449,7 +2687,11 @@ func (s *server) httpServer(addr string) *http.Server {
 func (s *server) handler() http.Handler {
 	mux := http.NewServeMux()
 	mutating := func(h http.HandlerFunc) http.HandlerFunc {
-		return s.requireAuth(s.requireRateLimit(s.mutationLimiter, h))
+		return s.requireAuth(s.requireRateLimit(s.mutationLimiter, func(w http.ResponseWriter, req *http.Request) {
+			s.globalMutationMu.RLock()
+			defer s.globalMutationMu.RUnlock()
+			h(w, req)
+		}))
 	}
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
 	mux.HandleFunc("/login", s.requireRateLimit(s.loginLimiter, s.handleLogin))
@@ -2462,6 +2704,12 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("/upload/abort", mutating(s.handleUploadAbort))
 	mux.HandleFunc("/pin", mutating(s.handlePin))
 	mux.HandleFunc("/clear", mutating(s.handleClear))
+	admin := func(h http.HandlerFunc) http.HandlerFunc {
+		return s.requireLocalAdmin(s.requireAuth(s.requireRateLimit(s.mutationLimiter, h)))
+	}
+	mux.HandleFunc("/admin/rooms", admin(s.handleAdminRooms))
+	mux.HandleFunc("/admin/rooms/delete", admin(s.handleDeleteRooms))
+	mux.HandleFunc("/admin/clear-all", admin(s.handleClearAll))
 	mux.HandleFunc("/item", s.requireAuth(s.handleItem))
 	mux.HandleFunc("/blob", s.requireAuth(s.handleBlob))
 	mux.HandleFunc("/events", s.requireAuth(s.handleEvents))

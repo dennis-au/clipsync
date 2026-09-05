@@ -60,7 +60,10 @@ the operator-owned local Compose stack. It safely starts, stops, and restarts th
 clipboard and tunnel, can copy the current shared password, and can generate a new
 password then recreate the stack to apply it. Password rotation changes only
 `CLIPSYNC_PASSWORD` in `.env`; it never changes `compose.yaml` or the persistent
-volume. Its Stop command preserves room data. Build and launch it locally with:
+volume. Its Room Data pane lists non-empty rooms, deletes one or several selected
+rooms, or force-deletes all stored room data and incomplete uploads. These
+administrative actions are available only through the loopback service, never the
+public tunnel. Its Stop command preserves room data. Build and launch it locally with:
 
 ```bash
 cd macos/ClipSyncControl
@@ -68,6 +71,10 @@ cd macos/ClipSyncControl
 ```
 
 Approve the project folder in the utility's Settings before it can control Docker.
+For a release-ready Apple Silicon artifact, run
+`./macos/ClipSyncControl/script/package_release.sh 0.2.0`; it creates an ad-hoc
+signed developer ZIP under `macos/ClipSyncControl/dist/release/`. It is not
+notarized and macOS may ask the user to approve the first launch.
 
 ## Configuration
 
@@ -182,6 +189,11 @@ The web UI is served from `/`. Endpoints:
 - `POST /clear?room=` — permanently remove every item from a room
 - `POST /login` — form field `password`; sets an auth cookie
 - `POST /logout`
+
+The controller also uses authenticated `/admin/*` endpoints for room inventory and
+deletion. The server returns `404` for these endpoints unless the request targets a
+loopback host directly, and it also rejects requests arriving through a configured
+trusted proxy. They are intentionally unavailable through the public tunnel.
 
 ## License
 

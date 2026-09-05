@@ -4,37 +4,45 @@ import SwiftUI
 struct SettingsView: View {
     @EnvironmentObject private var settings: SettingsStore
     @EnvironmentObject private var status: StatusStore
-    @State private var selection: SettingsSection? = .stack
+    @State private var selection = SettingsSection.stack
 
     var body: some View {
         NavigationSplitView {
-            List(SettingsSection.allCases, selection: $selection) { section in
-                Label(section.title, systemImage: section.symbolName)
-                    .tag(section)
+            List(selection: $selection) {
+                ForEach(SettingsSection.allCases) { section in
+                    Label(section.title, systemImage: section.symbolName)
+                        .tag(section)
+                }
             }
             .listStyle(.sidebar)
             .navigationTitle("ClipSync")
+            .navigationSplitViewColumnWidth(min: 180, ideal: 210, max: 260)
         } detail: {
-            Group {
-                switch selection ?? .stack {
-                case .stack:
-                    StackSettingsPane(
-                        settings: settings,
-                        status: status,
-                        chooseProjectFolder: chooseProjectFolder,
-                        chooseDockerCLI: chooseDockerCLI
-                    )
-                case .connection:
-                    ConnectionSettingsPane(settings: settings)
-                case .startup:
-                    StartupSettingsPane(settings: settings)
-                case .about:
-                    AboutSettingsPane(status: status)
+            ScrollView {
+                Group {
+                    switch selection {
+                    case .stack:
+                        StackSettingsPane(
+                            settings: settings,
+                            status: status,
+                            chooseProjectFolder: chooseProjectFolder,
+                            chooseDockerCLI: chooseDockerCLI
+                        )
+                    case .connection:
+                        ConnectionSettingsPane(settings: settings)
+                    case .roomData:
+                        RoomDataSettingsPane(settings: settings)
+                    case .startup:
+                        StartupSettingsPane(settings: settings)
+                    case .about:
+                        AboutSettingsPane(status: status)
+                    }
                 }
+                .frame(maxWidth: .infinity, minHeight: 540, alignment: .topLeading)
+                .padding(30)
             }
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .padding(30)
         }
+        .navigationSplitViewStyle(.balanced)
         .frame(minWidth: 780, minHeight: 600)
     }
 
@@ -63,6 +71,7 @@ struct SettingsView: View {
 private enum SettingsSection: CaseIterable, Hashable, Identifiable {
     case stack
     case connection
+    case roomData
     case startup
     case about
 
@@ -72,6 +81,7 @@ private enum SettingsSection: CaseIterable, Hashable, Identifiable {
         switch self {
         case .stack: "Stack"
         case .connection: "Connection"
+        case .roomData: "Room Data"
         case .startup: "Startup"
         case .about: "About"
         }
@@ -81,9 +91,229 @@ private enum SettingsSection: CaseIterable, Hashable, Identifiable {
         switch self {
         case .stack: "shippingbox"
         case .connection: "network"
+        case .roomData: "externaldrive"
         case .startup: "power"
         case .about: "info.circle"
         }
+    }
+}
+
+private struct RoomDataSettingsPane: View {
+    @StateObject private var roomData: RoomDataStore
+    @State private var pendingDeletion: Set<String> = []
+    @State private var showDeleteConfirmation = false
+    @State private var deleteAllRequested = false
+
+    init(settings: SettingsStore) {
+        _roomData = StateObject(wrappedValue: RoomDataStore(settings: settings))
+    }
+
+    var body: some View {
+        SettingsPane(
+            title: "Room data",
+            subtitle: "Review non-empty rooms stored by the local ClipSync service and permanently delete selected data."
+        ) {
+            SettingsGroup(title: "Stored rooms") {
+                HStack(spacing: 12) {
+                    Button {
+                        Task { await roomData.refresh() }
+                    } label: {
+                        Label("Refresh", systemImage: "arrow.clockwise")
+                    }
+                    .disabled(roomData.isLoading || roomData.isDeleting)
+
+                    Spacer()
+
+                    if !roomData.rooms.isEmpty {
+                        Button(roomData.allSelected ? "Deselect All" : "Select All") {
+                            roomData.toggleAll()
+                        }
+                        .disabled(roomData.isDeleting)
+
+                        Button("Delete Selected…", role: .destructive) {
+                            requestDeletion(roomData.selectedRooms)
+                        }
+                        .disabled(roomData.selectedRooms.isEmpty || roomData.isDeleting)
+                    }
+                }
+
+                Divider()
+
+                roomList
+
+                if let errorMessage = roomData.errorMessage {
+                    Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else if !roomData.message.isEmpty {
+                    Text(roomData.message)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
+                Divider()
+
+                HStack(alignment: .center, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Delete all room data")
+                            .font(.body.weight(.medium))
+                        Text("Removes every stored item and incomplete upload from the local service.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 16)
+                    Button("Delete All Data…", role: .destructive) {
+                        pendingDeletion = []
+                        deleteAllRequested = true
+                        showDeleteConfirmation = true
+                    }
+                    .disabled(roomData.isLoading || roomData.isDeleting)
+                }
+            }
+        }
+        .task {
+            await roomData.refresh()
+        }
+        .confirmationDialog(
+            deletionTitle,
+            isPresented: $showDeleteConfirmation,
+            titleVisibility: .visible
+        ) {
+            if deleteAllRequested {
+                Button("Delete All Data", role: .destructive) {
+                    deleteAllRequested = false
+                    Task { await roomData.clearAllData() }
+                }
+            } else {
+                Button(deletionButtonTitle, role: .destructive) {
+                    let rooms = pendingDeletion
+                    pendingDeletion = []
+                    Task { await roomData.deleteRooms(rooms) }
+                }
+            }
+            Button("Cancel", role: .cancel) {
+                pendingDeletion = []
+                deleteAllRequested = false
+            }
+        } message: {
+            Text(deletionMessage)
+        }
+    }
+
+    @ViewBuilder
+    private var roomList: some View {
+        if roomData.isLoading && roomData.rooms.isEmpty {
+            HStack {
+                Spacer()
+                ProgressView("Loading rooms…")
+                Spacer()
+            }
+            .frame(height: 160)
+        } else if roomData.rooms.isEmpty {
+            VStack(spacing: 9) {
+                Image(systemName: "tray")
+                    .font(.title2)
+                    .foregroundStyle(.secondary)
+                Text("No stored room data")
+                    .font(.headline)
+                Text("Only rooms containing one or more items appear here.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, minHeight: 160)
+        } else {
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    ForEach(roomData.rooms) { room in
+                        RoomDataRow(
+                            room: room,
+                            isSelected: roomData.selectedRooms.contains(room.name),
+                            isEnabled: !roomData.isDeleting,
+                            toggleSelection: { roomData.toggleSelection(for: room.name) },
+                            delete: { requestDeletion([room.name]) }
+                        )
+                        if room.id != roomData.rooms.last?.id {
+                            Divider()
+                        }
+                    }
+                }
+            }
+            .frame(minHeight: 160, maxHeight: 260)
+        }
+    }
+
+    private var deletionTitle: String {
+        if deleteAllRequested {
+            return "Delete all ClipSync data?"
+        }
+        return pendingDeletion.count == 1 ? "Delete this room's data?" : "Delete \(pendingDeletion.count) rooms' data?"
+    }
+
+    private var deletionButtonTitle: String {
+        pendingDeletion.count == 1 ? "Delete Room" : "Delete \(pendingDeletion.count) Rooms"
+    }
+
+    private var deletionMessage: String {
+        if deleteAllRequested {
+            return "Every room, text item, image, file, and incomplete upload will be permanently deleted. This cannot be undone."
+        }
+        return "All text, images, and files in the selected room\(pendingDeletion.count == 1 ? "" : "s") will be permanently deleted. This cannot be undone."
+    }
+
+    private func requestDeletion(_ rooms: Set<String>) {
+        guard !rooms.isEmpty else { return }
+        pendingDeletion = rooms
+        deleteAllRequested = false
+        showDeleteConfirmation = true
+    }
+}
+
+private struct RoomDataRow: View {
+    let room: RoomDataSummary
+    let isSelected: Bool
+    let isEnabled: Bool
+    let toggleSelection: () -> Void
+    let delete: () -> Void
+
+    var body: some View {
+        HStack(spacing: 12) {
+            Button(action: toggleSelection) {
+                Image(systemName: isSelected ? "checkmark.square.fill" : "square")
+                    .foregroundStyle(isSelected ? Color.accentColor : Color.secondary)
+                    .font(.body)
+            }
+            .buttonStyle(.plain)
+            .disabled(!isEnabled)
+            .accessibilityLabel(isSelected ? "Deselect \(room.name)" : "Select \(room.name)")
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(room.name)
+                    .font(.body.weight(.medium))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+                Text("\(room.itemCount) item\(room.itemCount == 1 ? "" : "s") · \(formattedBytes)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer(minLength: 16)
+
+            Button(role: .destructive, action: delete) {
+                Image(systemName: "trash")
+            }
+            .buttonStyle(.borderless)
+            .disabled(!isEnabled)
+            .help("Delete this room's data")
+            .accessibilityLabel("Delete \(room.name)")
+        }
+        .padding(.vertical, 9)
+        .contentShape(Rectangle())
+    }
+
+    private var formattedBytes: String {
+        ByteCountFormatter.string(fromByteCount: room.storedBytes, countStyle: .file)
     }
 }
 

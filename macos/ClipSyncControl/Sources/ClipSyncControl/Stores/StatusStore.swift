@@ -100,14 +100,6 @@ final class StatusStore: ObservableObject {
         NSWorkspace.shared.open(URL(string: "http://127.0.0.1:8788")!)
     }
 
-    func openPublicClipSync() {
-        guard let url = URL(string: settings.publicURL), !settings.publicURL.isEmpty else {
-            detail = "Set a public URL in Settings first."
-            return
-        }
-        NSWorkspace.shared.open(url)
-    }
-
     func openDockerDesktop() {
         let url = URL(fileURLWithPath: "/Applications/Docker.app")
         NSWorkspace.shared.openApplication(at: url, configuration: .init()) { _, _ in }

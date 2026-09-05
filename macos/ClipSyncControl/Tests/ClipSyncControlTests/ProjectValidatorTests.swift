@@ -1,8 +1,23 @@
+import AppKit
 import Foundation
 import XCTest
 @testable import ClipSyncControl
 
 final class ProjectValidatorTests: XCTestCase {
+    func testStatusIconIsAVisibleTemplateImage() throws {
+        let image = LinkedClipsStatusIcon.image
+
+        XCTAssertTrue(image.isTemplate)
+        XCTAssertEqual(image.size, NSSize(width: 18, height: 18))
+        let representation = try XCTUnwrap(NSBitmapImageRep(data: try XCTUnwrap(image.tiffRepresentation)))
+        let visiblePixels = (0..<representation.pixelsHigh).reduce(into: 0) { total, y in
+            for x in 0..<representation.pixelsWide where representation.colorAt(x: x, y: y)?.alphaComponent ?? 0 > 0.1 {
+                total += 1
+            }
+        }
+        XCTAssertGreaterThan(visiblePixels, 40)
+    }
+
     func testValidatorAcceptsPrivateExpectedProjectShape() throws {
         let project = try makeProject()
 
@@ -84,6 +99,69 @@ final class ProjectValidatorTests: XCTestCase {
         XCTAssertFalse(arguments.contains("down"))
         XCTAssertFalse(arguments.contains("-v"))
         XCTAssertFalse(arguments.contains("rm"))
+    }
+
+    func testRoomDataRequestUsesHashedCookieWithoutExposingPassword() throws {
+        let request = RoomDataClient.request(
+            baseURL: URL(string: "http://127.0.0.1:8788")!,
+            path: "/admin/rooms",
+            method: "GET",
+            password: "test"
+        )
+
+        XCTAssertEqual(request.url?.absoluteString, "http://127.0.0.1:8788/admin/rooms")
+        XCTAssertEqual(request.httpMethod, "GET")
+        XCTAssertEqual(
+            request.value(forHTTPHeaderField: "Cookie"),
+            "clip_auth=9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+        )
+        XCTAssertFalse(request.value(forHTTPHeaderField: "Cookie")?.contains("clip_auth=test") == true)
+    }
+
+    func testRoomDataListDecodesRoomMetadata() throws {
+        let data = Data(#"{"rooms":[{"name":"alpha","items":2,"bytes":1536},{"name":"beta","items":1,"bytes":42}]}"#.utf8)
+
+        let response = try RoomDataClient.decodeRoomList(data)
+
+        XCTAssertEqual(response.rooms, [
+            RoomDataSummary(name: "alpha", itemCount: 2, storedBytes: 1536),
+            RoomDataSummary(name: "beta", itemCount: 1, storedBytes: 42),
+        ])
+    }
+
+    func testClearAllRequestIncludesExplicitDestructiveConfirmation() throws {
+        let request = RoomDataClient.clearAllRequest(
+            baseURL: URL(string: "http://127.0.0.1:8788")!,
+            password: "test"
+        )
+
+        XCTAssertEqual(request.url?.absoluteString, "http://127.0.0.1:8788/admin/clear-all")
+        XCTAssertEqual(request.httpMethod, "POST")
+        XCTAssertEqual(request.timeoutInterval, RoomDataClient.destructiveRequestTimeout)
+        XCTAssertEqual(
+            request.value(forHTTPHeaderField: "X-Clipsync-Confirm"),
+            RoomDataClient.clearAllConfirmation
+        )
+        XCTAssertEqual(
+            request.value(forHTTPHeaderField: "Cookie"),
+            "clip_auth=9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+        )
+    }
+
+    func testDeleteRoomsRequestContainsOnlySelectedRooms() throws {
+        let request = try RoomDataClient.deleteRoomsRequest(
+            baseURL: URL(string: "http://127.0.0.1:8788")!,
+            password: "test",
+            roomNames: ["alpha", "beta"]
+        )
+
+        XCTAssertEqual(request.url?.absoluteString, "http://127.0.0.1:8788/admin/rooms/delete")
+        XCTAssertEqual(request.httpMethod, "POST")
+        XCTAssertEqual(request.timeoutInterval, RoomDataClient.destructiveRequestTimeout)
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/json")
+        let body = try XCTUnwrap(request.httpBody)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: [String]])
+        XCTAssertEqual(object, ["rooms": ["alpha", "beta"]])
     }
 
     func testProcessRunnerReturnsCommandOutput() async throws {

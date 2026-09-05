@@ -2,7 +2,6 @@ import AppKit
 import SwiftUI
 
 struct MenuContentView: View {
-    @EnvironmentObject private var settings: SettingsStore
     @EnvironmentObject private var status: StatusStore
     let openSettings: () -> Void
     @State private var showStopWarning = false
@@ -124,13 +123,6 @@ struct MenuContentView: View {
             sectionTitle("Connections")
             MenuActionRow(title: "Open Local ClipSync", symbolName: "network") {
                 status.openLocalClipSync()
-            }
-            MenuActionRow(
-                title: "Open Public ClipSync",
-                symbolName: "globe",
-                isEnabled: !settings.publicURL.isEmpty
-            ) {
-                status.openPublicClipSync()
             }
         }
         .padding(.vertical, 11)
