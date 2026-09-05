@@ -17,7 +17,7 @@ All of the following must pass before an icon change is complete:
 2. The visible macOS menu bar is deliberately revealed and captured at full
    desktop scale. The status item is clearly visible among the system icons.
 3. The status item has the requested visual treatment. The current expected
-   treatment is the overlapping-squares symbol with the `Clip` label.
+   treatment is the overlapping-squares symbol without a text label.
 4. Clicking the visible item opens the ClipSync control popover.
 5. The menu bar remains revealed while the popover is open.
 6. The control app tests pass after the final rebuild.

@@ -46,9 +46,7 @@ private final class StatusItemController: NSObject, NSPopoverDelegate {
     private func configureStatusItem() {
         guard let button = statusItem.button else { return }
         button.image = LinkedClipsStatusIcon.image
-        button.title = "Clip"
-        button.font = .systemFont(ofSize: 12, weight: .medium)
-        button.imagePosition = .imageLeading
+        button.imagePosition = .imageOnly
         button.imageScaling = .scaleProportionallyDown
         button.target = self
         button.action = #selector(togglePopover(_:))
@@ -78,6 +76,24 @@ private final class StatusItemController: NSObject, NSPopoverDelegate {
     private func showPopover() {
         guard let button = statusItem.button else { return }
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        DispatchQueue.main.async { [weak self, weak button] in
+            self?.keepPopoverInsideVisibleScreen(button: button)
+        }
+    }
+
+    private func keepPopoverInsideVisibleScreen(button: NSStatusBarButton?) {
+        guard
+            let popoverWindow = popover.contentViewController?.view.window,
+            let screen = button?.window?.screen ?? popoverWindow.screen ?? NSScreen.main
+        else {
+            return
+        }
+
+        let visibleFrame = screen.visibleFrame
+        var frame = popoverWindow.frame
+        let highestAllowedOrigin = max(visibleFrame.minY, visibleFrame.maxY - frame.height)
+        frame.origin.y = min(max(frame.origin.y, visibleFrame.minY), highestAllowedOrigin)
+        popoverWindow.setFrame(frame, display: true)
     }
 
     private func updateStatusItemMetadata() {
