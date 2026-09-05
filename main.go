@@ -1615,7 +1615,14 @@ func (s *server) handleLogin(w http.ResponseWriter, req *http.Request) {
 }
 
 func (s *server) handleLogout(w http.ResponseWriter, req *http.Request) {
-	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: "", Path: "/", MaxAge: -1})
+	if req.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name: cookieName, Value: "", Path: "/", MaxAge: -1,
+		HttpOnly: true, Secure: true, SameSite: http.SameSiteLaxMode,
+	})
 	http.Redirect(w, req, "/", http.StatusSeeOther)
 }
 
@@ -2446,7 +2453,7 @@ func (s *server) handler() http.Handler {
 	}
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
 	mux.HandleFunc("/login", s.requireRateLimit(s.loginLimiter, s.handleLogin))
-	mux.HandleFunc("/logout", s.handleLogout)
+	mux.HandleFunc("/logout", s.requireAuth(s.handleLogout))
 	mux.HandleFunc("/list", s.requireAuth(s.handleList))
 	mux.HandleFunc("/push", mutating(s.handlePush))
 	mux.HandleFunc("/upload/start", mutating(s.handleUploadStart))

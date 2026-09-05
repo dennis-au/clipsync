@@ -129,6 +129,38 @@ func authenticatedRequest(s *server, method, target string, body io.Reader) *htt
 	return req
 }
 
+func TestLogoutRequiresAuthenticationAndPost(t *testing.T) {
+	s := newTestServer(t)
+	s.authToken = "test-token"
+	h := s.handler()
+
+	unauthenticated := httptest.NewRecorder()
+	h.ServeHTTP(unauthenticated, httptest.NewRequest(http.MethodPost, "/logout", nil))
+	if unauthenticated.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated logout status = %d, want %d", unauthenticated.Code, http.StatusUnauthorized)
+	}
+
+	get := httptest.NewRecorder()
+	h.ServeHTTP(get, authenticatedRequest(s, http.MethodGet, "/logout", nil))
+	if get.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("GET logout status = %d, want %d", get.Code, http.StatusMethodNotAllowed)
+	}
+
+	post := httptest.NewRecorder()
+	h.ServeHTTP(post, authenticatedRequest(s, http.MethodPost, "/logout", nil))
+	if post.Code != http.StatusSeeOther {
+		t.Fatalf("POST logout status = %d, want %d", post.Code, http.StatusSeeOther)
+	}
+	if got := post.Header().Get("Location"); got != "/" {
+		t.Fatalf("POST logout location = %q, want /", got)
+	}
+
+	cookies := post.Result().Cookies()
+	if len(cookies) != 1 || cookies[0].Name != cookieName || cookies[0].MaxAge >= 0 {
+		t.Fatalf("logout cookie = %#v, want deleted %q cookie", cookies, cookieName)
+	}
+}
+
 type boundedResponseWriter struct {
 	header   http.Header
 	status   int
