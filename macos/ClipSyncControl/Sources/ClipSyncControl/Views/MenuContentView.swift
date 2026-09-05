@@ -4,7 +4,7 @@ import SwiftUI
 struct MenuContentView: View {
     @EnvironmentObject private var settings: SettingsStore
     @EnvironmentObject private var status: StatusStore
-    @Environment(\.openWindow) private var openWindow
+    let openSettings: () -> Void
     @State private var showStopWarning = false
 
     var body: some View {
@@ -26,8 +26,7 @@ struct MenuContentView: View {
 
             Divider()
             MenuActionRow(title: "Settings", symbolName: "gear") {
-                NSApp.activate(ignoringOtherApps: true)
-                openWindow(id: "settings")
+                openSettings()
             }
 
             Divider()

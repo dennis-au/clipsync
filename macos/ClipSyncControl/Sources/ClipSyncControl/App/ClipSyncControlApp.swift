@@ -15,25 +15,15 @@ struct ClipSyncControlApp: App {
 
     init() {
         let settings = SettingsStore()
+        let status = StatusStore(settings: settings)
         _settings = StateObject(wrappedValue: settings)
-        _status = StateObject(wrappedValue: StatusStore(settings: settings))
+        _status = StateObject(wrappedValue: status)
+        StatusItemManager.shared.install(settings: settings, status: status)
     }
 
     var body: some Scene {
-        MenuBarExtra {
-            MenuContentView()
-                .environmentObject(settings)
-                .environmentObject(status)
-        } label: {
-            LinkedClipsStatusIconView()
-                .accessibilityLabel(status.snapshot.accessibilityLabel)
-        }
-        .menuBarExtraStyle(.window)
-
-        Window("ClipSync Control Settings", id: "settings") {
-            SettingsView()
-                .environmentObject(settings)
-                .environmentObject(status)
+        Settings {
+            EmptyView()
         }
     }
 }
