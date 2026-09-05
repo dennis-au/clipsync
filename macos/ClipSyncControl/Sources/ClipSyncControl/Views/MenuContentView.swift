@@ -20,13 +20,33 @@ struct MenuContentView: View {
 
             Divider()
 
-            HStack {
-                Button("Start ClipSync") { status.start() }
-                    .disabled(status.isBusy || !status.snapshot.canStart)
-                Button("Stop") { showStopWarning = true }
-                    .disabled(status.isBusy || !status.snapshot.canStop)
-                Button("Restart") { status.restart() }
-                    .disabled(status.isBusy || !status.snapshot.canStop)
+            if showStopWarning {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Stop ClipSync?")
+                        .font(.headline)
+                    Text("Active connections and uploads will be interrupted. Stored room data will be preserved.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    HStack {
+                        Button("Cancel") { showStopWarning = false }
+                        Button("Stop ClipSync", role: .destructive) {
+                            showStopWarning = false
+                            status.stop()
+                        }
+                    }
+                }
+                .padding(10)
+                .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+            } else {
+                HStack {
+                    Button("Start ClipSync") { status.start() }
+                        .disabled(status.isBusy || !status.snapshot.canStart)
+                    Button("Stop") { showStopWarning = true }
+                        .disabled(status.isBusy || !status.snapshot.canStop)
+                    Button("Restart") { status.restart() }
+                        .disabled(status.isBusy || !status.snapshot.canStop)
+                }
             }
 
             if status.snapshot == .imagesMissing {
@@ -63,11 +83,5 @@ struct MenuContentView: View {
         }
         .padding(14)
         .frame(width: 330)
-        .alert("Stop ClipSync?", isPresented: $showStopWarning) {
-            Button("Stop", role: .destructive) { status.stop() }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("Active connections and uploads will be interrupted. Stored room data will be preserved.")
-        }
     }
 }
