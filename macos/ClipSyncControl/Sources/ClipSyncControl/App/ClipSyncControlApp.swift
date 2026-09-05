@@ -1,6 +1,18 @@
 import AppKit
 
 @main
+enum ClipSyncControlApp {
+    @MainActor
+    static func main() {
+        let application = NSApplication.shared
+        let delegate = AppDelegate()
+        application.delegate = delegate
+        application.run()
+        withExtendedLifetime(delegate) {}
+    }
+}
+
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var settings: SettingsStore?
     private var status: StatusStore?
