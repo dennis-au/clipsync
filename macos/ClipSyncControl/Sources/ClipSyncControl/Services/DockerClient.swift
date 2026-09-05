@@ -76,6 +76,10 @@ struct DockerClient {
         try await compose(["--profile", "tunnel", "stop", "--timeout", "30"])
     }
 
+    func applyPasswordChange() async throws -> CommandResult {
+        try await compose(["--profile", "tunnel", "up", "-d", "--no-build", "--force-recreate"])
+    }
+
     func prepareMissingImages() async throws -> CommandResult {
         let clipboardMissing = try await !imageExists("denlab-clipboard:local")
         let tunnelMissing = try await !imageExists("cloudflare/cloudflared:2026.8.2")

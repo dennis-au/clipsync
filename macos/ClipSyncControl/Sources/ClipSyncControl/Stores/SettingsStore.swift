@@ -83,6 +83,13 @@ final class SettingsStore: ObservableObject {
         setupMessage = "Folder approval removed."
     }
 
+    func recordControllerManagedProjectChange() throws {
+        let project = try ProjectValidator.validate(projectPath: projectPath)
+        approval = ProjectApproval(path: project.directory.path, fingerprint: project.fingerprint, approvedAt: Date())
+        saveApproval()
+        setupMessage = "Folder remains approved after a ClipSync Control update."
+    }
+
     private func saveApproval() {
         if let approval, let data = try? JSONEncoder().encode(approval) {
             UserDefaults.standard.set(data, forKey: Key.approval)

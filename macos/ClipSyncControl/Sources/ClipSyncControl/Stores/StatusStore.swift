@@ -51,6 +51,31 @@ final class StatusStore: ObservableObject {
         Task { await perform(.prepareImages) }
     }
 
+    func copyCurrentPassword() {
+        guard !isBusy else {
+            detail = "Wait for the current ClipSync action to finish."
+            return
+        }
+
+        do {
+            let project = try settings.approvedProject()
+            let password = try ClipSyncPasswordStore.currentPassword(in: project)
+            let pasteboard = NSPasteboard.general
+            pasteboard.clearContents()
+            guard pasteboard.setString(password, forType: .string) else {
+                throw ClipSyncPasswordStoreError.clipboardWriteFailed
+            }
+            detail = "Current password copied to the clipboard."
+        } catch {
+            detail = safeMessage(for: error)
+        }
+        lastUpdated = Date()
+    }
+
+    func generatePasswordAndRestart() {
+        Task { await perform(.rotatePassword) }
+    }
+
     func refresh() async {
         guard !isBusy else { return }
         do {
@@ -145,6 +170,20 @@ final class StatusStore: ObservableObject {
                     return
                 }
                 await waitForLocalHealth(client: client, expectingHealthy: true)
+            case .rotatePassword:
+                let password = try ClipSyncPasswordStore.generatePassword()
+                try ClipSyncPasswordStore.replacePassword(in: project, with: password)
+                try settings.recordControllerManagedProjectChange()
+
+                snapshot = .starting
+                detail = "Applying the new password and restarting the local stack."
+                let result = try await client.applyPasswordChange()
+                guard result.exitCode == 0 else {
+                    snapshot = .error("Password saved but restart failed")
+                    detail = "The new password was saved, but ClipSync did not restart. Check Docker, then restart ClipSync."
+                    return
+                }
+                await waitForLocalHealth(client: client, expectingHealthy: true)
             case .prepareImages:
                 snapshot = .starting
                 detail = "Preparing only missing local images."
@@ -227,6 +266,7 @@ final class StatusStore: ObservableObject {
         case start
         case stop
         case restart
+        case rotatePassword
         case prepareImages
     }
 }

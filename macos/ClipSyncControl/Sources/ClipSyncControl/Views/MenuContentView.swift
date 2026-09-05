@@ -19,6 +19,9 @@ struct MenuContentView: View {
             }
 
             Divider()
+            passwordControls
+
+            Divider()
             connections
 
             Divider()
@@ -128,6 +131,27 @@ struct MenuContentView: View {
                 isEnabled: !settings.publicURL.isEmpty
             ) {
                 status.openPublicClipSync()
+            }
+        }
+        .padding(.vertical, 11)
+    }
+
+    private var passwordControls: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            sectionTitle("Password")
+            MenuActionRow(
+                title: "Copy Current Password",
+                symbolName: "doc.on.doc",
+                isEnabled: !status.isBusy
+            ) {
+                status.copyCurrentPassword()
+            }
+            MenuActionRow(
+                title: "Generate New Password & Restart",
+                symbolName: "key.fill",
+                isEnabled: !status.isBusy
+            ) {
+                status.generatePasswordAndRestart()
             }
         }
         .padding(.vertical, 11)

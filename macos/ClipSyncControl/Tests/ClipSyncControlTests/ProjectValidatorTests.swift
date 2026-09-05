@@ -49,6 +49,43 @@ final class ProjectValidatorTests: XCTestCase {
         XCTAssertNotEqual(first, second)
     }
 
+    func testPasswordStoreReadsAndAtomicallyReplacesPassword() throws {
+        let project = try makeProject(environment: "# Keep this comment\nCLIPSYNC_PASSWORD=old-password\nCLIPSYNC_TTL_DAYS=30\n")
+        let validated = try ProjectValidator.validate(projectPath: project.path)
+
+        XCTAssertEqual(try ClipSyncPasswordStore.currentPassword(in: validated), "old-password")
+        try ClipSyncPasswordStore.replacePassword(in: validated, with: "new_password-123")
+
+        let environment = try String(contentsOf: project.appendingPathComponent(".env"), encoding: .utf8)
+        XCTAssertEqual(environment, "# Keep this comment\nCLIPSYNC_PASSWORD=new_password-123\nCLIPSYNC_TTL_DAYS=30\n")
+        XCTAssertEqual(try ClipSyncPasswordStore.currentPassword(in: validated), "new_password-123")
+        XCTAssertNoThrow(try ProjectValidator.validate(projectPath: project.path))
+        let permissions = try FileManager.default.attributesOfItem(atPath: validated.environmentFile.path)[.posixPermissions] as? NSNumber
+        XCTAssertEqual(permissions?.uint16Value, 0o600)
+    }
+
+    func testGeneratedPasswordIsURLSafeAndHighEntropyLength() throws {
+        let password = try ClipSyncPasswordStore.generatePassword()
+
+        XCTAssertEqual(password.count, 43)
+        XCTAssertNotNil(password.range(of: #"^[A-Za-z0-9_-]{43}$"#, options: .regularExpression))
+    }
+
+    func testPasswordRotationComposeArgumentsPreservePersistentData() throws {
+        let project = try makeProject()
+        let validated = try ProjectValidator.validate(projectPath: project.path)
+        let arguments = DockerClient.composeArguments(
+            project: validated,
+            context: "default",
+            action: ["--profile", "tunnel", "up", "-d", "--no-build", "--force-recreate"]
+        )
+
+        XCTAssertTrue(arguments.contains("--force-recreate"))
+        XCTAssertFalse(arguments.contains("down"))
+        XCTAssertFalse(arguments.contains("-v"))
+        XCTAssertFalse(arguments.contains("rm"))
+    }
+
     func testProcessRunnerReturnsCommandOutput() async throws {
         let result = try await ProcessRunner.run(
             executable: URL(fileURLWithPath: "/usr/bin/printf"),
@@ -77,12 +114,12 @@ final class ProjectValidatorTests: XCTestCase {
         }
     }
 
-    private func makeProject() throws -> URL {
+    private func makeProject(environment: String = "CLIPSYNC_PASSWORD=test\n") throws -> URL {
         let project = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: project, withIntermediateDirectories: true)
         try "services:\n  clipboard:\n  cloudflared:\n".write(to: project.appendingPathComponent("compose.yaml"), atomically: true, encoding: .utf8)
-        try "CLIPSYNC_PASSWORD=test\n".write(to: project.appendingPathComponent(".env"), atomically: true, encoding: .utf8)
+        try environment.write(to: project.appendingPathComponent(".env"), atomically: true, encoding: .utf8)
         try "FROM scratch\n".write(to: project.appendingPathComponent("Dockerfile"), atomically: true, encoding: .utf8)
         XCTAssertEqual(chmod(project.path, 0o700), 0)
         XCTAssertEqual(chmod(project.appendingPathComponent("compose.yaml").path, 0o600), 0)

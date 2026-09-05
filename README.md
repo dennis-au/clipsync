@@ -57,7 +57,9 @@ operator-owned files and are not part of this repository.
 
 [`macos/ClipSyncControl`](macos/ClipSyncControl) is a native menu-bar utility for
 the operator-owned local Compose stack. It safely starts, stops, and restarts the
-clipboard and tunnel without changing `.env`, `compose.yaml`, or the persistent
+clipboard and tunnel, can copy the current shared password, and can generate a new
+password then recreate the stack to apply it. Password rotation changes only
+`CLIPSYNC_PASSWORD` in `.env`; it never changes `compose.yaml` or the persistent
 volume. Its Stop command preserves room data. Build and launch it locally with:
 
 ```bash
