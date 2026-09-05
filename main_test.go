@@ -1495,8 +1495,12 @@ func TestIndexPublishesConfiguredRoomLength(t *testing.T) {
 	s.maxRoomNameBytes = 7
 	result := httptest.NewRecorder()
 	s.handler().ServeHTTP(result, httptest.NewRequest(http.MethodGet, "/", nil))
-	if result.Code != http.StatusOK || !strings.Contains(result.Body.String(), "<body data-theme=\"dark\">") || !strings.Contains(result.Body.String(), "id=\"theme\"") || !strings.Contains(result.Body.String(), "window.CLIPSYNC_ROOM_LIMIT=7") || !strings.Contains(result.Body.String(), "window.CLIPSYNC_MAX_TEXT_BYTES=1048576") || !strings.Contains(result.Body.String(), "window.CLIPSYNC_MAX_FILE_BYTES=1048576") {
-		t.Fatalf("index config response = status %d, body %q", result.Code, result.Body.String())
+	body := result.Body.String()
+	if result.Code != http.StatusOK || !strings.Contains(body, "<body data-theme=\"dark\">") || !strings.Contains(body, ">Clipsync</div>") || !strings.Contains(body, "class=\"topbar-leading\"") || !strings.Contains(body, "id=\"theme\"") || !strings.Contains(body, "window.CLIPSYNC_ROOM_LIMIT=7") || !strings.Contains(body, "window.CLIPSYNC_MAX_TEXT_BYTES=1048576") || !strings.Contains(body, "window.CLIPSYNC_MAX_FILE_BYTES=1048576") {
+		t.Fatalf("index config response = status %d, body %q", result.Code, body)
+	}
+	if strings.Index(body, "class=\"topbar-leading\"") > strings.Index(body, "class=\"connection\"") {
+		t.Fatalf("theme control must remain outside the connection controls")
 	}
 }
 
