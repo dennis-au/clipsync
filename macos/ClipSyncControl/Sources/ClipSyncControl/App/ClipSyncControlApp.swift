@@ -30,7 +30,7 @@ struct ClipSyncControlApp: App {
         }
         .menuBarExtraStyle(.window)
 
-        Settings {
+        Window("ClipSync Control Settings", id: "settings") {
             SettingsView()
                 .environmentObject(settings)
                 .environmentObject(status)

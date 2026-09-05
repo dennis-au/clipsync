@@ -4,6 +4,7 @@ import SwiftUI
 struct MenuContentView: View {
     @EnvironmentObject private var settings: SettingsStore
     @EnvironmentObject private var status: StatusStore
+    @Environment(\.openWindow) private var openWindow
     @State private var showStopWarning = false
 
     var body: some View {
@@ -49,7 +50,7 @@ struct MenuContentView: View {
 
             Button {
                 NSApp.activate(ignoringOtherApps: true)
-                NSApp.sendAction(Selector(("showSettingsWindow:")), to: nil, from: nil)
+                openWindow(id: "settings")
             } label: {
                 Label("Settings", systemImage: "gear")
             }
