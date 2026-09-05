@@ -1,0 +1,46 @@
+services:
+  clipboard:
+    image: ${CLIPSYNC_IMAGE:-clipsync:local}
+    restart: unless-stopped
+    environment:
+      CLIPSYNC_PASSWORD: ${CLIPSYNC_PASSWORD:?Set CLIPSYNC_PASSWORD in .env}
+      CLIPSYNC_TTL_DAYS: ${CLIPSYNC_TTL_DAYS:-180}
+      CLIPSYNC_MAX_DISK_MB: ${CLIPSYNC_MAX_DISK_MB:-1024}
+      CLIPSYNC_MAX_TEXT_MB: ${CLIPSYNC_MAX_TEXT_MB:-64}
+      CLIPSYNC_TEXT_INLINE_KB: ${CLIPSYNC_TEXT_INLINE_KB:-64}
+      CLIPSYNC_MAX_IMAGE_MB: ${CLIPSYNC_MAX_IMAGE_MB:-64}
+      CLIPSYNC_MAX_FILE_MB: ${CLIPSYNC_MAX_FILE_MB:-64}
+      CLIPSYNC_UPLOAD_CHUNK_MB: ${CLIPSYNC_UPLOAD_CHUNK_MB:-32}
+      CLIPSYNC_UPLOAD_TTL_MINUTES: ${CLIPSYNC_UPLOAD_TTL_MINUTES:-15}
+      CLIPSYNC_UPLOAD_CHUNK_IDLE_SECONDS: ${CLIPSYNC_UPLOAD_CHUNK_IDLE_SECONDS:-120}
+      CLIPSYNC_MAX_UPLOADS: ${CLIPSYNC_MAX_UPLOADS:-16}
+      CLIPSYNC_MAX_UPLOADS_PER_CLIENT: ${CLIPSYNC_MAX_UPLOADS_PER_CLIENT:-2}
+      CLIPSYNC_MAX_UPLOADS_PER_ROOM: ${CLIPSYNC_MAX_UPLOADS_PER_ROOM:-4}
+      CLIPSYNC_MAX_ROOMS: ${CLIPSYNC_MAX_ROOMS:-128}
+      CLIPSYNC_MAX_ROOM_NAME_BYTES: ${CLIPSYNC_MAX_ROOM_NAME_BYTES:-64}
+      CLIPSYNC_MAX_ITEMS_PER_ROOM: ${CLIPSYNC_MAX_ITEMS_PER_ROOM:-80}
+      CLIPSYNC_MAX_UNPINNED_ITEMS_PER_ROOM: ${CLIPSYNC_MAX_UNPINNED_ITEMS_PER_ROOM:-60}
+      CLIPSYNC_MAX_PINNED_ITEMS_PER_ROOM: ${CLIPSYNC_MAX_PINNED_ITEMS_PER_ROOM:-20}
+      CLIPSYNC_MAX_SSE: ${CLIPSYNC_MAX_SSE:-128}
+      CLIPSYNC_MAX_SSE_PER_CLIENT: ${CLIPSYNC_MAX_SSE_PER_CLIENT:-4}
+    ports:
+      - "127.0.0.1:${CLIPSYNC_HOST_PORT:-8787}:8787"
+    volumes:
+      - clipboard-data:/var/lib/clipsync
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8787/healthz | grep -qx ok"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  clipboard-data:

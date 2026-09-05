@@ -14,3 +14,15 @@ blobs/
 *.swp
 .idea/
 .vscode/
+.env
+.env.*
+!.env.example
+
+# `compose.yaml` is an operator-owned deployment file. Start from
+# `compose.example.yaml` when creating a new stack.
+/compose.yaml
+/DEPLOYMENT.local.md
+
+# Encrypted deployment backups are intentionally kept outside the repository.
+/backups/
+/work/
