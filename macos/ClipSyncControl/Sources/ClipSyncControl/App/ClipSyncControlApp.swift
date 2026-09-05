@@ -25,7 +25,7 @@ struct ClipSyncControlApp: App {
                 .environmentObject(settings)
                 .environmentObject(status)
         } label: {
-            LinkedClipsStatusIcon()
+            LinkedClipsStatusIconView()
                 .accessibilityLabel(status.snapshot.accessibilityLabel)
         }
         .menuBarExtraStyle(.window)

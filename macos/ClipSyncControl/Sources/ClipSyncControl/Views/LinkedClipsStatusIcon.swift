@@ -1,30 +1,47 @@
+import AppKit
 import SwiftUI
 
-struct LinkedClipsStatusIcon: View {
+enum LinkedClipsStatusIcon {
+    static let image: NSImage = {
+        let image = NSImage(size: NSSize(width: 18, height: 18))
+        image.lockFocus()
+
+        NSColor.black.setStroke()
+        let strokeWidth: CGFloat = 1.8
+        let rear = NSBezierPath(
+            roundedRect: NSRect(x: 2.6, y: 2.6, width: 9.6, height: 10.1),
+            xRadius: 1.8,
+            yRadius: 1.8
+        )
+        rear.lineWidth = strokeWidth
+        rear.stroke()
+
+        let front = NSBezierPath(
+            roundedRect: NSRect(x: 6.1, y: 5.6, width: 9.6, height: 10.1),
+            xRadius: 1.8,
+            yRadius: 1.8
+        )
+        front.lineWidth = strokeWidth
+        front.stroke()
+
+        let connector = NSBezierPath()
+        connector.move(to: NSPoint(x: 7.4, y: 8.9))
+        connector.line(to: NSPoint(x: 11.1, y: 8.9))
+        connector.lineWidth = strokeWidth
+        connector.lineCapStyle = .round
+        connector.stroke()
+
+        image.unlockFocus()
+        image.isTemplate = true
+        return image
+    }()
+}
+
+struct LinkedClipsStatusIconView: View {
     var body: some View {
-        Canvas { context, size in
-            let scale = min(size.width, size.height) / 18
-            let stroke = StrokeStyle(lineWidth: 1.8 * scale, lineCap: .round, lineJoin: .round)
-            let rear = CGRect(x: 2.6 * scale, y: 5.3 * scale, width: 9.6 * scale, height: 10.1 * scale)
-            let front = CGRect(x: 6.1 * scale, y: 2.3 * scale, width: 9.6 * scale, height: 10.1 * scale)
-
-            context.stroke(
-                Path(roundedRect: rear, cornerRadius: 1.8 * scale),
-                with: .color(.primary),
-                style: stroke
-            )
-            context.stroke(
-                Path(roundedRect: front, cornerRadius: 1.8 * scale),
-                with: .color(.primary),
-                style: stroke
-            )
-
-            var connector = Path()
-            connector.move(to: CGPoint(x: 7.4 * scale, y: 9.1 * scale))
-            connector.addLine(to: CGPoint(x: 11.1 * scale, y: 9.1 * scale))
-            context.stroke(connector, with: .color(.primary), style: stroke)
-        }
-        .frame(width: 18, height: 18)
-        .accessibilityHidden(true)
+        Image(nsImage: LinkedClipsStatusIcon.image)
+            .renderingMode(.template)
+            .frame(width: 18, height: 18)
+            .accessibilityHidden(true)
     }
 }
