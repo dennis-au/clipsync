@@ -26,7 +26,7 @@ private final class StatusItemController: NSObject, NSPopoverDelegate {
     init(settings: SettingsStore, status: StatusStore) {
         self.settings = settings
         self.status = status
-        self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         self.settingsWindowController = SettingsWindowController(settings: settings, status: status)
         super.init()
 
