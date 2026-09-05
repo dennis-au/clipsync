@@ -8,80 +8,214 @@ struct MenuContentView: View {
     @State private var showStopWarning = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            VStack(alignment: .leading, spacing: 3) {
-                Label(status.snapshot.title, systemImage: status.snapshot.symbolName)
-                    .font(.headline)
-                Text(status.detail)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-
+        VStack(alignment: .leading, spacing: 0) {
+            header
             Divider()
 
             if showStopWarning {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Stop ClipSync?")
-                        .font(.headline)
-                    Text("Active connections and uploads will be interrupted. Stored room data will be preserved.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    HStack {
-                        Button("Cancel") { showStopWarning = false }
-                        Button("Stop ClipSync", role: .destructive) {
-                            showStopWarning = false
-                            status.stop()
-                        }
-                    }
-                }
-                .padding(10)
-                .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
+                stopConfirmation
             } else {
-                HStack {
-                    Button("Start ClipSync") { status.start() }
-                        .disabled(status.isBusy || !status.snapshot.canStart)
-                    Button("Stop") { showStopWarning = true }
-                        .disabled(status.isBusy || !status.snapshot.canStop)
-                    Button("Restart") { status.restart() }
-                        .disabled(status.isBusy || !status.snapshot.canStop)
-                }
-            }
-
-            if status.snapshot == .imagesMissing {
-                Button("Prepare Missing Images") { status.prepareImages() }
-                    .disabled(status.isBusy)
-            }
-
-            HStack {
-                Button("Open Local") { status.openLocalClipSync() }
-                Button("Open Public") { status.openPublicClipSync() }
-                    .disabled(settings.publicURL.isEmpty)
+                serviceControls
             }
 
             Divider()
+            connections
 
-            HStack {
-                Button("Open Docker Desktop") { status.openDockerDesktop() }
-                Button("Refresh") { Task { await status.refresh() } }
-                    .disabled(status.isBusy)
-            }
+            Divider()
+            utilityControls
 
-            Button {
+            Divider()
+            MenuActionRow(title: "Settings", symbolName: "gear") {
                 NSApp.activate(ignoringOtherApps: true)
                 openWindow(id: "settings")
-            } label: {
-                Label("Settings", systemImage: "gear")
             }
 
             Divider()
-
-            Button("Quit ClipSync Control") {
+            MenuActionRow(title: "Quit ClipSync Control", symbolName: "power", isDestructive: true) {
                 NSApplication.shared.terminate(nil)
             }
         }
-        .padding(14)
-        .frame(width: 330)
+        .padding(16)
+        .frame(width: 350)
+    }
+
+    private var header: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text("ClipSync")
+                .font(.title3.weight(.semibold))
+            HStack(spacing: 7) {
+                Image(systemName: status.snapshot.symbolName)
+                    .foregroundStyle(statusColor)
+                    .frame(width: 16)
+                Text(status.snapshot.title)
+                    .font(.subheadline.weight(.medium))
+            }
+            Text(status.detail)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.bottom, 15)
+    }
+
+    private var serviceControls: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            sectionTitle("Service Control")
+            MenuActionRow(
+                title: "Start ClipSync",
+                symbolName: "play.fill",
+                isEnabled: !status.isBusy && status.snapshot.canStart
+            ) {
+                status.start()
+            }
+            MenuActionRow(
+                title: "Stop ClipSync",
+                symbolName: "stop.fill",
+                isDestructive: true,
+                isEnabled: !status.isBusy && status.snapshot.canStop
+            ) {
+                showStopWarning = true
+            }
+            MenuActionRow(
+                title: "Restart ClipSync",
+                symbolName: "arrow.clockwise",
+                isEnabled: !status.isBusy && status.snapshot.canStop
+            ) {
+                status.restart()
+            }
+
+            if status.snapshot == .imagesMissing {
+                MenuActionRow(
+                    title: "Prepare Missing Images",
+                    symbolName: "arrow.down.circle",
+                    isEnabled: !status.isBusy
+                ) {
+                    status.prepareImages()
+                }
+            }
+        }
+        .padding(.vertical, 11)
+    }
+
+    private var stopConfirmation: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            sectionTitle("Stop ClipSync?")
+            Text("Active connections and uploads will be interrupted. Stored room data will be preserved.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 7)
+                .padding(.bottom, 6)
+            MenuActionRow(title: "Cancel", symbolName: "xmark") {
+                showStopWarning = false
+            }
+            MenuActionRow(title: "Stop ClipSync", symbolName: "stop.fill", isDestructive: true) {
+                showStopWarning = false
+                status.stop()
+            }
+        }
+        .padding(.vertical, 11)
+    }
+
+    private var connections: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            sectionTitle("Connections")
+            MenuActionRow(title: "Open Local ClipSync", symbolName: "network") {
+                status.openLocalClipSync()
+            }
+            MenuActionRow(
+                title: "Open Public ClipSync",
+                symbolName: "globe",
+                isEnabled: !settings.publicURL.isEmpty
+            ) {
+                status.openPublicClipSync()
+            }
+        }
+        .padding(.vertical, 11)
+    }
+
+    private var utilityControls: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            MenuActionRow(title: "Open Docker Desktop", symbolName: "shippingbox") {
+                status.openDockerDesktop()
+            }
+            MenuActionRow(
+                title: "Refresh Status",
+                symbolName: "arrow.clockwise",
+                isEnabled: !status.isBusy
+            ) {
+                Task { await status.refresh() }
+            }
+        }
+        .padding(.vertical, 8)
+    }
+
+    private func sectionTitle(_ title: String) -> some View {
+        Text(title)
+            .font(.subheadline.weight(.semibold))
+            .foregroundStyle(.secondary)
+            .padding(.horizontal, 7)
+            .padding(.bottom, 5)
+    }
+
+    private var statusColor: Color {
+        switch status.snapshot {
+        case .localHealthyTunnelStopped, .localHealthyPublicUnverified, .publicReachable:
+            .green
+        case .starting, .stopping, .imagesMissing:
+            .orange
+        case .off, .needsApproval:
+            .secondary
+        case .dockerUnavailable, .clipboardUnhealthy, .publicUnreachable, .error:
+            .red
+        }
+    }
+}
+
+private struct MenuActionRow: View {
+    let title: String
+    let symbolName: String
+    var isDestructive = false
+    var isEnabled = true
+    let action: () -> Void
+
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 11) {
+                Image(systemName: symbolName)
+                    .font(.system(size: 14, weight: .medium))
+                    .frame(width: 20, height: 20)
+                    .foregroundStyle(iconColor)
+                Text(title)
+                    .font(.body)
+                    .foregroundStyle(textColor)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 7)
+            .padding(.vertical, 7)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!isEnabled)
+        .onHover { isHovered = $0 }
+        .background {
+            if isHovered && isEnabled {
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(Color.primary.opacity(0.09))
+            }
+        }
+        .accessibilityLabel(title)
+    }
+
+    private var textColor: Color {
+        guard isEnabled else { return .secondary }
+        return isDestructive ? .red : .primary
+    }
+
+    private var iconColor: Color {
+        guard isEnabled else { return .secondary }
+        return isDestructive ? .red : .secondary
     }
 }
