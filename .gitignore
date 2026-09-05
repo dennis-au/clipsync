@@ -26,3 +26,7 @@ blobs/
 # Encrypted deployment backups are intentionally kept outside the repository.
 /backups/
 /work/
+
+# Local SwiftPM build artifacts for the macOS status utility.
+/macos/ClipSyncControl/.build/
+/macos/ClipSyncControl/dist/

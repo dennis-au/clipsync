@@ -53,6 +53,20 @@ image, Cloudflare Tunnel, upgrades, and backup guidance, read
 [DEPLOYMENT.md](DEPLOYMENT.md). `compose.yaml` and `.env` are intentionally
 operator-owned files and are not part of this repository.
 
+### macOS status utility
+
+[`macos/ClipSyncControl`](macos/ClipSyncControl) is a native menu-bar utility for
+the operator-owned local Compose stack. It safely starts, stops, and restarts the
+clipboard and tunnel without changing `.env`, `compose.yaml`, or the persistent
+volume. Its Stop command preserves room data. Build and launch it locally with:
+
+```bash
+cd macos/ClipSyncControl
+./script/build_and_run.sh --verify
+```
+
+Approve the project folder in the utility's Settings before it can control Docker.
+
 ## Configuration
 
 All configuration is via environment variables:
