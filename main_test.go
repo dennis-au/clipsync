@@ -1896,7 +1896,7 @@ func TestIndexPublishesConfiguredRoomLength(t *testing.T) {
 	result := httptest.NewRecorder()
 	s.handler().ServeHTTP(result, httptest.NewRequest(http.MethodGet, "/", nil))
 	body := result.Body.String()
-	if result.Code != http.StatusOK || !strings.Contains(body, "<body data-theme=\"dark\">") || !strings.Contains(body, ">Clipsync</div>") || !strings.Contains(body, "class=\"topbar-leading\"") || !strings.Contains(body, "id=\"theme\"") || !strings.Contains(body, "window.CLIPSYNC_ROOM_LIMIT=7") || !strings.Contains(body, "window.CLIPSYNC_MAX_TEXT_BYTES=1048576") || !strings.Contains(body, "window.CLIPSYNC_MAX_FILE_BYTES=1048576") {
+	if result.Code != http.StatusOK || !strings.Contains(body, "<body data-theme=\"dark\">") || !strings.Contains(body, ">Clipsync</div>") || !strings.Contains(body, "class=\"topbar-leading\"") || !strings.Contains(body, "id=\"theme\"") || !strings.Contains(body, "window.CLIPSYNC_ROOM_LIMIT=7") || !strings.Contains(body, "window.CLIPSYNC_MAX_TEXT_BYTES=1048576") || !strings.Contains(body, "window.CLIPSYNC_MAX_FILE_BYTES=1048576") || !strings.Contains(body, "schedulePolling") || !strings.Contains(body, "scheduleReconnect") || !strings.Contains(body, "stopConnectWatchdog") || !strings.Contains(body, "addEventListener('online'") {
 		t.Fatalf("index config response = status %d, body %q", result.Code, body)
 	}
 	if strings.Index(body, "class=\"topbar-leading\"") > strings.Index(body, "class=\"connection\"") {
