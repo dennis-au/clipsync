@@ -95,6 +95,14 @@ struct DockerClient {
         return CommandResult(exitCode: 0, standardOutput: "", standardError: "")
     }
 
+    func executeInClipboard(_ arguments: [String], timeout: TimeInterval) async throws -> CommandResult {
+        try await compose(Self.clipboardExecArguments(arguments), timeout: timeout)
+    }
+
+    static func clipboardExecArguments(_ arguments: [String]) -> [String] {
+        ["exec", "-T", "clipboard"] + arguments
+    }
+
     static func composeArguments(project: ValidatedProject, context: String, action: [String]) -> [String] {
         [
             "--context", context,

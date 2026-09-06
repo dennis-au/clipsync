@@ -15,27 +15,24 @@ enum RoomDataClientError: LocalizedError {
     }
 }
 
-struct RoomDataClient: Sendable {
-    static let localBaseURL = URL(string: "http://127.0.0.1:8788")!
+struct RoomDataClient {
+    static let containerBaseURL = URL(string: "http://127.0.0.1:8787")!
     static let clearAllConfirmation = "DELETE ALL CLIPSYNC DATA"
     static let destructiveRequestTimeout: TimeInterval = 5 * 60
 
     private let password: String
-    private let session: URLSession
+    private let docker: DockerClient
 
-    init(password: String, session: URLSession = RoomDataClient.makeSession()) {
+    init(project: ValidatedProject, preferredDockerPath: String, password: String) throws {
         self.password = password
-        self.session = session
+        docker = try DockerClient(project: project, preferredExecutablePath: preferredDockerPath)
     }
 
     func listRooms() async throws -> [RoomDataSummary] {
-        let request = Self.request(
-            baseURL: Self.localBaseURL,
+        let data = try await send(
             path: "/admin/rooms",
-            method: "GET",
-            password: password
+            method: .get
         )
-        let data = try await send(request)
         return try Self.decodeRoomList(data).rooms.sorted {
             $0.name.localizedStandardCompare($1.name) == .orderedAscending
         }
@@ -47,52 +44,49 @@ struct RoomDataClient: Sendable {
             return RoomDataDeleteResult(rooms: 0, items: 0, uploads: 0)
         }
 
-        let request = try Self.deleteRoomsRequest(
-            baseURL: Self.localBaseURL,
-            password: password,
-            roomNames: roomNames
+        let body = try JSONEncoder().encode(DeleteRoomsRequest(rooms: roomNames))
+        return try JSONDecoder().decode(
+            RoomDataDeleteResult.self,
+            from: await send(
+                path: "/admin/rooms/delete",
+                method: .post(body: String(decoding: body, as: UTF8.self), headers: ["Content-Type: application/json"]),
+                timeout: Self.destructiveRequestTimeout
+            )
         )
-        return try JSONDecoder().decode(RoomDataDeleteResult.self, from: await send(request))
     }
 
-    static func deleteRoomsRequest(baseURL: URL, password: String, roomNames: [String]) throws -> URLRequest {
-        var request = Self.request(
-            baseURL: baseURL,
+    static func deleteRoomsArguments(password: String, roomNames: [String]) throws -> [String] {
+        let body = try JSONEncoder().encode(DeleteRoomsRequest(rooms: roomNames))
+        return wgetArguments(
             path: "/admin/rooms/delete",
-            method: "POST",
-            password: password
+            method: .post(body: String(decoding: body, as: UTF8.self), headers: ["Content-Type: application/json"]),
+            password: password,
+            timeout: destructiveRequestTimeout
         )
-        request.timeoutInterval = destructiveRequestTimeout
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try JSONEncoder().encode(DeleteRoomsRequest(rooms: roomNames))
-        return request
     }
 
     func clearAllData() async throws -> RoomDataDeleteResult {
-        let request = Self.clearAllRequest(baseURL: Self.localBaseURL, password: password)
-        return try JSONDecoder().decode(RoomDataDeleteResult.self, from: await send(request))
-    }
-
-    static func clearAllRequest(baseURL: URL, password: String) -> URLRequest {
-        var request = Self.request(
-            baseURL: baseURL,
-            path: "/admin/clear-all",
-            method: "POST",
-            password: password
+        try JSONDecoder().decode(
+            RoomDataDeleteResult.self,
+            from: await send(
+                path: "/admin/clear-all",
+                method: .post(body: "", headers: ["X-Clipsync-Confirm: \(Self.clearAllConfirmation)"]),
+                timeout: Self.destructiveRequestTimeout
+            )
         )
-        request.timeoutInterval = destructiveRequestTimeout
-        request.setValue(clearAllConfirmation, forHTTPHeaderField: "X-Clipsync-Confirm")
-        return request
     }
 
-    static func request(baseURL: URL, path: String, method: String, password: String) -> URLRequest {
-        var request = URLRequest(url: baseURL.appendingPathComponent(String(path.dropFirst())))
-        request.httpMethod = method
-        request.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
-        request.timeoutInterval = 15
-        request.setValue("clip_auth=\(passwordToken(password))", forHTTPHeaderField: "Cookie")
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        return request
+    static func clearAllArguments(password: String) -> [String] {
+        wgetArguments(
+            path: "/admin/clear-all",
+            method: .post(body: "", headers: ["X-Clipsync-Confirm: \(clearAllConfirmation)"]),
+            password: password,
+            timeout: destructiveRequestTimeout
+        )
+    }
+
+    static func listRoomsArguments(password: String) -> [String] {
+        wgetArguments(path: "/admin/rooms", method: .get, password: password, timeout: 15)
     }
 
     static func decodeRoomList(_ data: Data) throws -> RoomDataListResponse {
@@ -103,38 +97,54 @@ struct RoomDataClient: Sendable {
         SHA256.hash(data: Data(password.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 
-    private func send(_ request: URLRequest) async throws -> Data {
-        let (data, response) = try await session.data(for: request)
-        guard let response = response as? HTTPURLResponse else {
-            throw RoomDataClientError.invalidResponse
+    private func send(path: String, method: Method, timeout: TimeInterval = 15) async throws -> Data {
+        let arguments = Self.wgetArguments(path: path, method: method, password: password, timeout: timeout)
+        let result = try await docker.executeInClipboard(arguments, timeout: timeout + 5)
+        guard result.exitCode == 0 else {
+            throw RoomDataClientError.requestFailed(Self.failureMessage(for: result))
         }
-        guard (200..<300).contains(response.statusCode) else {
-            let serverMessage = String(data: data, encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            let message: String
-            switch response.statusCode {
-            case 401:
-                message = "The local ClipSync password no longer matches. Refresh approval or restart ClipSync."
-            case 404:
-                message = "This ClipSync service does not support room-data management yet."
-            default:
-                message = serverMessage?.isEmpty == false
-                    ? serverMessage!
-                    : "Room-data request failed (HTTP \(response.statusCode))."
-            }
-            throw RoomDataClientError.requestFailed(message)
-        }
-        return data
+        return Data(result.standardOutput.utf8)
     }
 
-    private static func makeSession() -> URLSession {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.httpCookieStorage = nil
-        configuration.urlCache = nil
-        return URLSession(configuration: configuration)
+    private static func wgetArguments(path: String, method: Method, password: String, timeout: TimeInterval) -> [String] {
+        var arguments = [
+            "wget", "-q", "-S", "-O", "-", "-T", String(Int(timeout)),
+            "--header", "Cookie: clip_auth=\(passwordToken(password))",
+            "--header", "Accept: application/json",
+        ]
+        if case let .post(body, headers) = method {
+            for header in headers {
+                arguments += ["--header", header]
+            }
+            arguments += ["--post-data", body]
+        }
+        arguments.append(containerBaseURL.appendingPathComponent(String(path.dropFirst())).absoluteString)
+        return arguments
+    }
+
+    private static func failureMessage(for result: CommandResult) -> String {
+        let details = result.standardError.lowercased()
+        if details.contains("401 unauthorized") {
+            return "The local ClipSync password no longer matches. Refresh approval or restart ClipSync."
+        }
+        if details.contains("404 not found") {
+            return "This ClipSync service does not support room-data management yet."
+        }
+        if details.contains("is not running") || details.contains("no container found") {
+            return "Start ClipSync before managing room data."
+        }
+        if details.contains("wget: not found") {
+            return "The running ClipSync image cannot perform local room-data management."
+        }
+        return "ClipSync could not complete the room-data request."
     }
 
     private struct DeleteRoomsRequest: Encodable {
         let rooms: [String]
+    }
+
+    private enum Method {
+        case get
+        case post(body: String, headers: [String])
     }
 }

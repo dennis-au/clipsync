@@ -5,6 +5,9 @@ ClipSync Control is a personal macOS menu-bar utility for the Docker Compose sta
 It starts, stops, and restarts the local `clipboard` and Cloudflare tunnel services. It can copy the current shared password or generate a new cryptographically secure password and recreate the stack to apply it. Password rotation changes only `CLIPSYNC_PASSWORD` in `.env`; it never changes `compose.yaml` or removes the `clipboard-data` volume. Stop uses `docker compose stop`; it never removes stored ClipSync data.
 
 The Room Data settings pane lists every non-empty room in the local service. Rooms can be selected individually or in a batch and permanently deleted after an explicit confirmation. A separate force-delete action removes every room and incomplete upload. Room names and the deployment password remain local to the controller.
+Administrative requests run through `docker compose exec` against the clipboard
+container's loopback interface, so the destructive API remains unavailable from
+the host port and public tunnel.
 
 ## Run locally
 

@@ -101,21 +101,13 @@ final class ProjectValidatorTests: XCTestCase {
         XCTAssertFalse(arguments.contains("rm"))
     }
 
-    func testRoomDataRequestUsesHashedCookieWithoutExposingPassword() throws {
-        let request = RoomDataClient.request(
-            baseURL: URL(string: "http://127.0.0.1:8788")!,
-            path: "/admin/rooms",
-            method: "GET",
-            password: "test"
-        )
+    func testRoomDataListRunsAgainstContainerLoopbackWithHashedCookie() throws {
+        let arguments = RoomDataClient.listRoomsArguments(password: "test")
 
-        XCTAssertEqual(request.url?.absoluteString, "http://127.0.0.1:8788/admin/rooms")
-        XCTAssertEqual(request.httpMethod, "GET")
-        XCTAssertEqual(
-            request.value(forHTTPHeaderField: "Cookie"),
-            "clip_auth=9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
-        )
-        XCTAssertFalse(request.value(forHTTPHeaderField: "Cookie")?.contains("clip_auth=test") == true)
+        XCTAssertEqual(arguments.first, "wget")
+        XCTAssertTrue(arguments.contains("http://127.0.0.1:8787/admin/rooms"))
+        XCTAssertTrue(arguments.contains("Cookie: clip_auth=9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"))
+        XCTAssertFalse(arguments.contains { $0 == "test" || $0.contains("clip_auth=test") })
     }
 
     func testRoomDataListDecodesRoomMetadata() throws {
@@ -129,39 +121,31 @@ final class ProjectValidatorTests: XCTestCase {
         ])
     }
 
-    func testClearAllRequestIncludesExplicitDestructiveConfirmation() throws {
-        let request = RoomDataClient.clearAllRequest(
-            baseURL: URL(string: "http://127.0.0.1:8788")!,
-            password: "test"
-        )
+    func testClearAllArgumentsIncludeExplicitDestructiveConfirmation() throws {
+        let arguments = RoomDataClient.clearAllArguments(password: "test")
 
-        XCTAssertEqual(request.url?.absoluteString, "http://127.0.0.1:8788/admin/clear-all")
-        XCTAssertEqual(request.httpMethod, "POST")
-        XCTAssertEqual(request.timeoutInterval, RoomDataClient.destructiveRequestTimeout)
-        XCTAssertEqual(
-            request.value(forHTTPHeaderField: "X-Clipsync-Confirm"),
-            RoomDataClient.clearAllConfirmation
-        )
-        XCTAssertEqual(
-            request.value(forHTTPHeaderField: "Cookie"),
-            "clip_auth=9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
-        )
+        XCTAssertTrue(arguments.contains("http://127.0.0.1:8787/admin/clear-all"))
+        XCTAssertTrue(arguments.contains("X-Clipsync-Confirm: \(RoomDataClient.clearAllConfirmation)"))
+        XCTAssertTrue(arguments.contains("--post-data"))
     }
 
     func testDeleteRoomsRequestContainsOnlySelectedRooms() throws {
-        let request = try RoomDataClient.deleteRoomsRequest(
-            baseURL: URL(string: "http://127.0.0.1:8788")!,
-            password: "test",
-            roomNames: ["alpha", "beta"]
-        )
+        let arguments = try RoomDataClient.deleteRoomsArguments(password: "test", roomNames: ["alpha", "beta"])
 
-        XCTAssertEqual(request.url?.absoluteString, "http://127.0.0.1:8788/admin/rooms/delete")
-        XCTAssertEqual(request.httpMethod, "POST")
-        XCTAssertEqual(request.timeoutInterval, RoomDataClient.destructiveRequestTimeout)
-        XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/json")
-        let body = try XCTUnwrap(request.httpBody)
-        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: body) as? [String: [String]])
+        XCTAssertTrue(arguments.contains("http://127.0.0.1:8787/admin/rooms/delete"))
+        XCTAssertTrue(arguments.contains("Content-Type: application/json"))
+        let bodyIndex = try XCTUnwrap(arguments.firstIndex(of: "--post-data")) + 1
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(arguments[bodyIndex].utf8)) as? [String: [String]])
         XCTAssertEqual(object, ["rooms": ["alpha", "beta"]])
+    }
+
+    func testRoomDataDockerExecTargetsOnlyClipboardService() throws {
+        let arguments = DockerClient.clipboardExecArguments([
+            "wget", "http://127.0.0.1:8787/admin/rooms",
+        ])
+
+        XCTAssertEqual(arguments, ["exec", "-T", "clipboard", "wget", "http://127.0.0.1:8787/admin/rooms"])
+        XCTAssertFalse(arguments.contains("cloudflared"))
     }
 
     func testProcessRunnerReturnsCommandOutput() async throws {

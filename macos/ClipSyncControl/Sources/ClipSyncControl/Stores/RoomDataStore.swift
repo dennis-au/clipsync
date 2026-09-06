@@ -94,7 +94,11 @@ final class RoomDataStore: ObservableObject {
 
     private func client() throws -> RoomDataClient {
         let project = try settings.approvedProject()
-        return RoomDataClient(password: try ClipSyncPasswordStore.currentPassword(in: project))
+        return try RoomDataClient(
+            project: project,
+            preferredDockerPath: settings.dockerPath,
+            password: ClipSyncPasswordStore.currentPassword(in: project)
+        )
     }
 
     private func safeMessage(for error: Error) -> String {
