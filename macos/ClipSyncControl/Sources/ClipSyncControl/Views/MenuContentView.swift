@@ -18,6 +18,9 @@ struct MenuContentView: View {
             }
 
             Divider()
+            tunnelControls
+
+            Divider()
             passwordControls
 
             Divider()
@@ -63,14 +66,14 @@ struct MenuContentView: View {
         VStack(alignment: .leading, spacing: 2) {
             sectionTitle("Service Control")
             MenuActionRow(
-                title: "Start ClipSync",
+                title: "Start ClipSync & Tunnel",
                 symbolName: "play.fill",
                 isEnabled: !status.isBusy && status.snapshot.canStart
             ) {
                 status.start()
             }
             MenuActionRow(
-                title: "Stop ClipSync",
+                title: "Stop ClipSync & Tunnel",
                 symbolName: "stop.fill",
                 isDestructive: true,
                 isEnabled: !status.isBusy && status.snapshot.canStop
@@ -78,7 +81,7 @@ struct MenuContentView: View {
                 showStopWarning = true
             }
             MenuActionRow(
-                title: "Restart ClipSync",
+                title: "Restart ClipSync & Tunnel",
                 symbolName: "arrow.clockwise",
                 isEnabled: !status.isBusy && status.snapshot.canStop
             ) {
@@ -98,6 +101,27 @@ struct MenuContentView: View {
         .padding(.vertical, 11)
     }
 
+    private var tunnelControls: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            sectionTitle("Cloudflare Tunnel")
+            MenuActionRow(
+                title: "Start Tunnel",
+                symbolName: "network",
+                isEnabled: !status.isBusy && status.snapshot.canStartTunnel
+            ) {
+                status.startTunnel()
+            }
+            MenuActionRow(
+                title: "Restart Tunnel",
+                symbolName: "arrow.clockwise",
+                isEnabled: !status.isBusy && status.snapshot.canRestartTunnel
+            ) {
+                status.restartTunnel()
+            }
+        }
+        .padding(.vertical, 11)
+    }
+
     private var stopConfirmation: some View {
         VStack(alignment: .leading, spacing: 2) {
             sectionTitle("Stop ClipSync?")
@@ -110,7 +134,7 @@ struct MenuContentView: View {
             MenuActionRow(title: "Cancel", symbolName: "xmark") {
                 showStopWarning = false
             }
-            MenuActionRow(title: "Stop ClipSync", symbolName: "stop.fill", isDestructive: true) {
+            MenuActionRow(title: "Stop ClipSync & Tunnel", symbolName: "stop.fill", isDestructive: true) {
                 showStopWarning = false
                 status.stop()
             }

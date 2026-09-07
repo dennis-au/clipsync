@@ -1,5 +1,11 @@
 import Foundation
 
+struct StackServiceState: Equatable {
+    let clipboardRunning: Bool
+    let tunnelRunning: Bool
+    let localHealthy: Bool
+}
+
 enum StackStatus: Equatable {
     case needsApproval
     case off
@@ -22,7 +28,7 @@ enum StackStatus: Equatable {
         case .starting: "Starting ClipSync"
         case .stopping: "Stopping ClipSync"
         case .clipboardUnhealthy: "Clipboard is unhealthy"
-        case .localHealthyTunnelStopped: "Local healthy, tunnel off"
+        case .localHealthyTunnelStopped: "Local healthy, tunnel unavailable"
         case .localHealthyPublicUnverified: "Local healthy, tunnel on"
         case .publicUnreachable: "Public check failed"
         case .publicReachable: "Publicly reachable"
@@ -60,5 +66,38 @@ enum StackStatus: Equatable {
         default:
             true
         }
+    }
+
+    var canStartTunnel: Bool {
+        self == .localHealthyTunnelStopped
+    }
+
+    var canRestartTunnel: Bool {
+        switch self {
+        case .localHealthyPublicUnverified, .publicUnreachable, .publicReachable:
+            true
+        default:
+            false
+        }
+    }
+
+    static func classify(
+        services: StackServiceState,
+        publicEndpointConfigured: Bool,
+        publicEndpointHealthy: Bool? = nil
+    ) -> StackStatus {
+        guard services.clipboardRunning || services.localHealthy else {
+            return .off
+        }
+        guard services.localHealthy else {
+            return .clipboardUnhealthy
+        }
+        guard services.tunnelRunning else {
+            return .localHealthyTunnelStopped
+        }
+        guard publicEndpointConfigured else {
+            return .localHealthyPublicUnverified
+        }
+        return publicEndpointHealthy == true ? .publicReachable : .publicUnreachable
     }
 }

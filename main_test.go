@@ -994,6 +994,838 @@ func TestClearRoomDeletesHistoryAndBlobs(t *testing.T) {
 	}
 }
 
+func TestDeleteItemRemovesOnlySelectedItemAndStorage(t *testing.T) {
+	s := newTestServer(t)
+	s.textInlineSize = 8
+	push := func(kind, body string) item {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodPost, "/push?room=delete-room", strings.NewReader(body))
+		req.Header.Set("X-Kind", kind)
+		if kind == "file" {
+			req.Header.Set("X-Mime", "text/plain")
+			req.Header.Set("X-Name", "delete.txt")
+		}
+		result := httptest.NewRecorder()
+		s.handler().ServeHTTP(result, req)
+		if result.Code != http.StatusOK {
+			t.Fatalf("push %s status = %d, body=%s", kind, result.Code, result.Body.String())
+		}
+		var created item
+		if err := json.NewDecoder(result.Body).Decode(&created); err != nil {
+			t.Fatal(err)
+		}
+		return created
+	}
+
+	inline := push("text", "keep")
+	file := push("file", "file to delete")
+	largeText := strings.Repeat("large text ", 12)
+	large := push("text", largeText)
+	if !large.TextBlob {
+		t.Fatalf("large text was not stored as a blob: %#v", large)
+	}
+	if got := atomic.LoadInt64(&totalBytes); got != inline.Size+file.Size+large.Size {
+		t.Fatalf("quota before deletion = %d", got)
+	}
+
+	deleteItem := func(id string) {
+		t.Helper()
+		result := httptest.NewRecorder()
+		s.handler().ServeHTTP(result, httptest.NewRequest(http.MethodPost, "/delete?room=delete-room&id="+id, nil))
+		if result.Code != http.StatusOK {
+			t.Fatalf("delete %s status = %d, body=%s", id, result.Code, result.Body.String())
+		}
+		var response map[string]string
+		if err := json.NewDecoder(result.Body).Decode(&response); err != nil {
+			t.Fatal(err)
+		}
+		if response["deleted"] != id {
+			t.Fatalf("delete response = %#v, want id %q", response, id)
+		}
+	}
+
+	deleteItem(file.ID)
+	items := s.existingRoom("delete-room").list()
+	if len(items) != 2 || items[0].ID != inline.ID || items[1].ID != large.ID {
+		t.Fatalf("surviving items = %#v", items)
+	}
+	if _, err := os.Stat(s.blobPath("delete-room", file.ID)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("deleted file blob remains: %v", err)
+	}
+	fileGet := httptest.NewRequest(http.MethodGet, "/blob?room=delete-room&id="+file.ID, nil)
+	fileResult := httptest.NewRecorder()
+	s.handler().ServeHTTP(fileResult, fileGet)
+	if fileResult.Code != http.StatusNotFound {
+		t.Fatalf("deleted file download status = %d", fileResult.Code)
+	}
+	if got := atomic.LoadInt64(&totalBytes); got != inline.Size+large.Size {
+		t.Fatalf("quota after file delete = %d", got)
+	}
+
+	deleteItem(large.ID)
+	if _, err := os.Stat(s.textBlobPath("delete-room", large.ID)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("deleted large text blob remains: %v", err)
+	}
+	largeGet := httptest.NewRequest(http.MethodGet, "/item?room=delete-room&id="+large.ID, nil)
+	largeResult := httptest.NewRecorder()
+	s.handler().ServeHTTP(largeResult, largeGet)
+	if largeResult.Code != http.StatusNotFound {
+		t.Fatalf("deleted large text item status = %d", largeResult.Code)
+	}
+
+	deleteItem(inline.ID)
+	if s.existingRoom("delete-room") != nil {
+		t.Fatal("deleting the final item left an inactive empty room")
+	}
+	if got := atomic.LoadInt64(&totalBytes); got != 0 {
+		t.Fatalf("quota after all deletes = %d", got)
+	}
+}
+
+func TestDeleteItemSSEEventAndPersistenceFailure(t *testing.T) {
+	t.Run("emits an exact delete event", func(t *testing.T) {
+		s := newTestServer(t)
+		mustAddToRoom(t, s, "room", testItem("remove-me", "text"))
+		if err := s.save(); err != nil {
+			t.Fatal(err)
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		events := httptest.NewRequest(http.MethodGet, "/events?room=room", nil).WithContext(ctx)
+		eventsResult := newSSEResponseWriter()
+		done := make(chan struct{})
+		go func() {
+			s.handler().ServeHTTP(eventsResult, events)
+			close(done)
+		}()
+		select {
+		case <-eventsResult.wrote:
+		case <-time.After(time.Second):
+			t.Fatal("SSE snapshot was not written")
+		}
+
+		deleteResult := httptest.NewRecorder()
+		s.handler().ServeHTTP(deleteResult, httptest.NewRequest(http.MethodPost, "/delete?room=room&id=remove-me", nil))
+		if deleteResult.Code != http.StatusOK {
+			t.Fatalf("delete status = %d, body=%s", deleteResult.Code, deleteResult.Body.String())
+		}
+		deadline := time.Now().Add(time.Second)
+		for !strings.Contains(eventsResult.BodyString(), `{"kind":"delete","id":"remove-me"}`) && time.Now().Before(deadline) {
+			time.Sleep(time.Millisecond)
+		}
+		body := eventsResult.BodyString()
+		if !strings.Contains(body, `{"kind":"delete","id":"remove-me"}`) {
+			t.Fatalf("SSE delete event = %q", body)
+		}
+		if strings.Contains(body, `"kind":"delete","item"`) {
+			t.Fatalf("SSE delete event unexpectedly included item data: %q", body)
+		}
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("SSE connection did not close")
+		}
+	})
+
+	t.Run("a failed metadata save retains the blob for restart", func(t *testing.T) {
+		s := newTestServer(t)
+		id := nextID()
+		size, err := s.writeBlob("room", id, bytes.NewReader([]byte("keep until durable")), 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.addToRoom("room", item{ID: id, Kind: "file", Mime: "application/octet-stream", Name: "keep.bin", Size: size, At: 1}); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.save(); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithCancel(context.Background())
+		events := httptest.NewRequest(http.MethodGet, "/events?room=room", nil).WithContext(ctx)
+		eventsResult := newSSEResponseWriter()
+		done := make(chan struct{})
+		go func() {
+			s.handler().ServeHTTP(eventsResult, events)
+			close(done)
+		}()
+		select {
+		case <-eventsResult.wrote:
+		case <-time.After(time.Second):
+			t.Fatal("SSE snapshot was not written")
+		}
+		s.persistOps.createTemp = func(string, string) (*os.File, error) {
+			return nil, errors.New("injected create failure")
+		}
+
+		result := httptest.NewRecorder()
+		s.handler().ServeHTTP(result, httptest.NewRequest(http.MethodPost, "/delete?room=room&id="+id, nil))
+		if result.Code != http.StatusServiceUnavailable {
+			t.Fatalf("delete status = %d, want %d", result.Code, http.StatusServiceUnavailable)
+		}
+		if _, err := os.Stat(s.blobPath("room", id)); err != nil {
+			t.Fatalf("delete removed blob before metadata save: %v", err)
+		}
+		if got := atomic.LoadInt64(&totalBytes); got != size {
+			t.Fatalf("delete released quota before metadata save: %d", got)
+		}
+		if strings.Contains(eventsResult.BodyString(), `"kind":"delete"`) {
+			t.Fatalf("failed delete reached live SSE clients: %q", eventsResult.BodyString())
+		}
+		items := s.existingRoom("room").list()
+		if len(items) != 1 || items[0].ID != id {
+			t.Fatalf("failed delete changed in-memory state: %#v", items)
+		}
+		listResult := httptest.NewRecorder()
+		s.handler().ServeHTTP(listResult, httptest.NewRequest(http.MethodGet, "/list?room=room", nil))
+		var listed struct {
+			Items []item `json:"items"`
+		}
+		if err := json.NewDecoder(listResult.Body).Decode(&listed); err != nil {
+			t.Fatal(err)
+		}
+		if len(listed.Items) != 1 || listed.Items[0].ID != id {
+			t.Fatalf("failed delete changed list response: %#v", listed.Items)
+		}
+
+		restarted := newTestServer(t)
+		restarted.stateDir = s.stateDir
+		restarted.load()
+		restartedItems := restarted.existingRoom("room").list()
+		if len(restartedItems) != 1 || restartedItems[0].ID != id {
+			t.Fatalf("restart after failed delete items = %#v", restartedItems)
+		}
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("SSE connection did not close")
+		}
+	})
+
+	t.Run("a failed backup refresh restores the prior deletion state", func(t *testing.T) {
+		s := newTestServer(t)
+		id := nextID()
+		size, err := s.writeBlob("room", id, bytes.NewReader([]byte("preserve for backup recovery")), 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.addToRoom("room", item{ID: id, Kind: "file", Mime: "application/octet-stream", Name: "keep.bin", Size: size, At: 1}); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.save(); err != nil {
+			t.Fatal(err)
+		}
+
+		ctx, cancel := context.WithCancel(context.Background())
+		events := httptest.NewRequest(http.MethodGet, "/events?room=room", nil).WithContext(ctx)
+		eventsResult := newSSEResponseWriter()
+		done := make(chan struct{})
+		go func() {
+			s.handler().ServeHTTP(eventsResult, events)
+			close(done)
+		}()
+		select {
+		case <-eventsResult.wrote:
+		case <-time.After(time.Second):
+			t.Fatal("SSE snapshot was not written")
+		}
+
+		defaults := defaultPersistenceOps()
+		directorySyncs := 0
+		s.persistOps.sync = func(f *os.File) error {
+			info, err := f.Stat()
+			if err != nil {
+				return err
+			}
+			if info.IsDir() {
+				directorySyncs++
+				// The fourth directory sync is the candidate backup rename: the
+				// deletion transaction itself is sync one.
+				if directorySyncs == 4 {
+					return errors.New("injected backup post-rename directory sync failure")
+				}
+			}
+			return defaults.sync(f)
+		}
+		result := httptest.NewRecorder()
+		s.handler().ServeHTTP(result, httptest.NewRequest(http.MethodPost, "/delete?room=room&id="+id, nil))
+		if result.Code != http.StatusServiceUnavailable {
+			t.Fatalf("delete status = %d, want %d; body=%s", result.Code, http.StatusServiceUnavailable, result.Body.String())
+		}
+		if got := result.Header().Get("X-Clipsync-Persistence"); got != "failed" {
+			t.Fatalf("persistence header = %q", got)
+		}
+		if body := eventsResult.BodyString(); strings.Contains(body, `{"kind":"delete"`) {
+			t.Fatalf("failed delete reached SSE clients: %q", body)
+		}
+		listResult := httptest.NewRecorder()
+		s.handler().ServeHTTP(listResult, httptest.NewRequest(http.MethodGet, "/list?room=room", nil))
+		var listed struct {
+			Items []item `json:"items"`
+		}
+		if err := json.NewDecoder(listResult.Body).Decode(&listed); err != nil {
+			t.Fatal(err)
+		}
+		if len(listed.Items) != 1 || listed.Items[0].ID != id {
+			t.Fatalf("failed delete changed live list data: %#v", listed.Items)
+		}
+		if _, err := os.Stat(s.blobPath("room", id)); err != nil {
+			t.Fatalf("failed delete removed blob: %v", err)
+		}
+		if got := atomic.LoadInt64(&totalBytes); got != size {
+			t.Fatalf("failed delete released quota: %d", got)
+		}
+
+		restarted := newTestServer(t)
+		restarted.stateDir = s.stateDir
+		restarted.load()
+		restartedItems := restarted.existingRoom("room").list()
+		if len(restartedItems) != 1 || restartedItems[0].ID != id {
+			t.Fatalf("restart did not recover the restored primary: %#v", restartedItems)
+		}
+		if got := atomic.LoadInt64(&totalBytes); got != size {
+			t.Fatalf("restart quota changed after failed delete: %d", got)
+		}
+		if err := os.WriteFile(s.persistPath(), []byte("corrupt primary"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		fallback := newTestServer(t)
+		fallback.stateDir = s.stateDir
+		fallback.load()
+		fallbackItems := fallback.existingRoom("room").list()
+		if len(fallbackItems) != 1 || fallbackItems[0].ID != id {
+			t.Fatalf("backup recovery after failed delete items = %#v", fallbackItems)
+		}
+		restarted.persistOps = persistenceOps{}
+		followUp := httptest.NewRequest(http.MethodPost, "/push?room=room", strings.NewReader("cleanup commit"))
+		followUp.Header.Set("X-Kind", "text")
+		followUpResult := httptest.NewRecorder()
+		restarted.handler().ServeHTTP(followUpResult, followUp)
+		if followUpResult.Code != http.StatusOK {
+			t.Fatalf("follow-up snapshot status = %d, body=%s", followUpResult.Code, followUpResult.Body.String())
+		}
+		if _, err := os.Stat(restarted.blobPath("room", id)); err != nil {
+			t.Fatalf("recovered blob was lost after a successful follow-up: %v", err)
+		}
+		if got := atomic.LoadInt64(&totalBytes); got != size+int64(len("cleanup commit")) {
+			t.Fatalf("recovered quota changed after follow-up: %d", got)
+		}
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("SSE connection did not close")
+		}
+	})
+}
+
+func TestDeleteItemReportsUncertainWhenRollbackCannotSync(t *testing.T) {
+	s := newTestServer(t)
+	id := nextID()
+	size, err := s.writeBlob("room", id, bytes.NewReader([]byte("retain during uncertain delete")), 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.addToRoom("room", item{ID: id, Kind: "file", Mime: "application/octet-stream", Name: "keep.bin", Size: size, At: 1}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.save(); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	events := httptest.NewRequest(http.MethodGet, "/events?room=room", nil).WithContext(ctx)
+	eventsResult := newSSEResponseWriter()
+	done := make(chan struct{})
+	go func() {
+		s.handler().ServeHTTP(eventsResult, events)
+		close(done)
+	}()
+	select {
+	case <-eventsResult.wrote:
+	case <-time.After(time.Second):
+		t.Fatal("SSE snapshot was not written")
+	}
+
+	defaults := defaultPersistenceOps()
+	directorySyncs := 0
+	s.persistOps.sync = func(f *os.File) error {
+		info, err := f.Stat()
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
+			directorySyncs++
+			// Four is the candidate backup after its rename; five is the
+			// primary rollback after its rename. Both failures are observable
+			// post-rename outcomes, not pre-write failures.
+			if directorySyncs == 4 || directorySyncs == 5 {
+				return errors.New("injected post-rename directory sync failure")
+			}
+		}
+		return defaults.sync(f)
+	}
+
+	result := httptest.NewRecorder()
+	s.handler().ServeHTTP(result, httptest.NewRequest(http.MethodPost, "/delete?room=room&id="+id, nil))
+	if result.Code != http.StatusServiceUnavailable {
+		t.Fatalf("delete status = %d, want %d; body=%s", result.Code, http.StatusServiceUnavailable, result.Body.String())
+	}
+	if got := result.Header().Get("X-Clipsync-Persistence"); got != "uncertain" {
+		t.Fatalf("persistence header = %q, want uncertain", got)
+	}
+	if !strings.Contains(result.Body.String(), "outcome is uncertain") || strings.Contains(result.Body.String(), "nothing changed") {
+		t.Fatalf("uncertain response body = %q", result.Body.String())
+	}
+	if strings.Contains(eventsResult.BodyString(), `{"kind":"delete"`) {
+		t.Fatalf("uncertain delete reached SSE clients: %q", eventsResult.BodyString())
+	}
+	live := s.existingRoom("room").list()
+	if len(live) != 1 || live[0].ID != id {
+		t.Fatalf("uncertain delete changed live state: %#v", live)
+	}
+	listResult := httptest.NewRecorder()
+	s.handler().ServeHTTP(listResult, httptest.NewRequest(http.MethodGet, "/list?room=room", nil))
+	var listed struct {
+		Items []item `json:"items"`
+	}
+	if err := json.NewDecoder(listResult.Body).Decode(&listed); err != nil {
+		t.Fatal(err)
+	}
+	if len(listed.Items) != 1 || listed.Items[0].ID != id {
+		t.Fatalf("uncertain delete changed list response: %#v", listed.Items)
+	}
+	if _, err := os.Stat(s.blobPath("room", id)); err != nil {
+		t.Fatalf("uncertain delete removed blob: %v", err)
+	}
+	if got := atomic.LoadInt64(&totalBytes); got != size {
+		t.Fatalf("uncertain delete released quota: %d", got)
+	}
+
+	// Startup sees the pending transaction and restores both replicas before
+	// loading, so normal and backup fallback recovery agree on the old item.
+	restarted := newTestServer(t)
+	restarted.stateDir = s.stateDir
+	restarted.load()
+	items := restarted.existingRoom("room").list()
+	if len(items) != 1 || items[0].ID != id {
+		t.Fatalf("restart after uncertain delete items = %#v", items)
+	}
+	if err := os.WriteFile(s.persistPath(), []byte("corrupt primary"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	fallback := newTestServer(t)
+	fallback.stateDir = s.stateDir
+	fallback.load()
+	fallbackItems := fallback.existingRoom("room").list()
+	if len(fallbackItems) != 1 || fallbackItems[0].ID != id {
+		t.Fatalf("backup recovery after uncertain delete items = %#v", fallbackItems)
+	}
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("SSE connection did not close")
+	}
+}
+
+func TestCommittedDeleteTransactionRecoversBlobCleanupExactlyOnce(t *testing.T) {
+	tests := []struct {
+		name string
+		make func(t *testing.T, s *server, id string) item
+	}{
+		{
+			name: "file",
+			make: func(t *testing.T, s *server, id string) item {
+				t.Helper()
+				size, err := s.writeBlob("room", id, bytes.NewReader([]byte("delete file after committed marker")), 128)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return item{ID: id, Kind: "file", Mime: "application/octet-stream", Name: "delete.bin", Size: size, At: 1}
+			},
+		},
+		{
+			name: "image",
+			make: func(t *testing.T, s *server, id string) item {
+				t.Helper()
+				size, err := s.writeBlob("room", id, bytes.NewReader([]byte("delete image after committed marker")), 128)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return item{ID: id, Kind: "image", Mime: "image/png", Name: "delete.png", Size: size, At: 1}
+			},
+		},
+		{
+			name: "large text blob",
+			make: func(t *testing.T, s *server, id string) item {
+				t.Helper()
+				size, err := s.writeTextBlob("room", id, bytes.NewReader([]byte("delete oversized text after committed marker")), 128)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return item{ID: id, Kind: "text", TextBlob: true, Size: size, At: 1}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			s := newTestServer(t)
+			keep := testItem("keep", "keep")
+			mustAddToRoom(t, s, "room", keep)
+			id := nextID()
+			remove := test.make(t, s, id)
+			if _, err := s.addToRoom("room", remove); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.save(); err != nil {
+				t.Fatal(err)
+			}
+			previous, err := os.ReadFile(s.persistPath())
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, replacement, found := s.existingRoom("room").removalPlan(id)
+			if !found {
+				t.Fatal("target missing before simulated crash")
+			}
+			candidateDump := s.snapshot()
+			candidateDump["room"] = replacement
+			candidate, err := json.Marshal(candidateDump)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// This is the durable candidate pair immediately before a process
+			// crash, with the committed recovery record not yet cleaned up.
+			if err := s.saveSnapshot(candidateDump); err != nil {
+				t.Fatal(err)
+			}
+			tx := deleteTransaction{
+				Version:   1,
+				State:     "committed",
+				Previous:  previous,
+				Candidate: candidate,
+				Removal:   deletionRecovery{Room: "room", Item: remove},
+			}
+			if err := s.writeDeleteTransaction(tx); err != nil {
+				t.Fatal(err)
+			}
+			transactionBytes, err := os.ReadFile(s.deleteTransactionPath())
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Contains(transactionBytes, []byte(`"room":"room"`)) || !bytes.Contains(transactionBytes, []byte(`"id":"`+id+`"`)) {
+				t.Fatalf("committed deletion transaction omitted cleanup identity: %s", transactionBytes)
+			}
+
+			restarted := newTestServer(t)
+			restarted.stateDir = s.stateDir
+			restarted.load()
+			items := restarted.existingRoom("room").list()
+			if len(items) != 1 || items[0].ID != keep.ID {
+				t.Fatalf("committed recovery items = %#v", items)
+			}
+			if _, err := os.Stat(restarted.itemBlobPath("room", remove)); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("committed recovery left deleted blob: %v", err)
+			}
+			if got := atomic.LoadInt64(&totalBytes); got != keep.Size {
+				t.Fatalf("quota after committed recovery = %d, want %d", got, keep.Size)
+			}
+			restarted.load()
+			if got := atomic.LoadInt64(&totalBytes); got != keep.Size {
+				t.Fatalf("second startup released deletion quota twice: %d, want %d", got, keep.Size)
+			}
+		})
+	}
+}
+
+func TestDeleteTransactionBlocksLaterPersistentMutations(t *testing.T) {
+	makeServer := func(t *testing.T) (*server, item, item, []byte, []byte) {
+		t.Helper()
+		s := newTestServer(t)
+		keep := testItem("keep", "keep")
+		remove := testItem("remove", "remove")
+		mustAddToRoom(t, s, "room", keep)
+		mustAddToRoom(t, s, "room", remove)
+		if err := s.save(); err != nil {
+			t.Fatal(err)
+		}
+		previous, err := os.ReadFile(s.persistPath())
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, replacement, found := s.existingRoom("room").removalPlan(remove.ID)
+		if !found {
+			t.Fatal("target missing")
+		}
+		candidateDump := s.snapshot()
+		candidateDump["room"] = replacement
+		candidate, err := json.Marshal(candidateDump)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return s, keep, remove, previous, candidate
+	}
+
+	assertBlocked := func(t *testing.T, s *server, keep item) {
+		t.Helper()
+		push := httptest.NewRequest(http.MethodPost, "/push?room=room", strings.NewReader("must not persist"))
+		push.Header.Set("X-Kind", "text")
+		pushResult := httptest.NewRecorder()
+		s.handler().ServeHTTP(pushResult, push)
+		if pushResult.Code != http.StatusServiceUnavailable || pushResult.Header().Get("X-Clipsync-Persistence") != "uncertain" {
+			t.Fatalf("journal-guarded push = %d/%q", pushResult.Code, pushResult.Header().Get("X-Clipsync-Persistence"))
+		}
+		pinResult := httptest.NewRecorder()
+		s.handler().ServeHTTP(pinResult, httptest.NewRequest(http.MethodPost, "/pin?room=room&id="+keep.ID+"&pin=1", nil))
+		if pinResult.Code != http.StatusServiceUnavailable {
+			t.Fatalf("journal-guarded pin = %d", pinResult.Code)
+		}
+		clearResult := httptest.NewRecorder()
+		s.handler().ServeHTTP(clearResult, httptest.NewRequest(http.MethodPost, "/clear?room=room", nil))
+		if clearResult.Code != http.StatusServiceUnavailable {
+			t.Fatalf("journal-guarded room clear = %d", clearResult.Code)
+		}
+		adminResult := httptest.NewRecorder()
+		adminRequest := localRequest(http.MethodPost, "/admin/clear-all", nil)
+		adminRequest.Header.Set("X-Clipsync-Confirm", clearAllConfirmation)
+		s.handler().ServeHTTP(adminResult, adminRequest)
+		if adminResult.Code != http.StatusServiceUnavailable {
+			t.Fatalf("journal-guarded global clear = %d", adminResult.Code)
+		}
+	}
+
+	t.Run("pending journal restores previous state without accepting newer actions", func(t *testing.T) {
+		s, keep, remove, previous, candidate := makeServer(t)
+		if err := s.writeDeleteTransaction(deleteTransaction{Version: 1, State: "pending", Previous: previous, Candidate: candidate, Removal: deletionRecovery{Room: "room", Item: remove}}); err != nil {
+			t.Fatal(err)
+		}
+		assertBlocked(t, s, keep)
+		s.ttl = -time.Second
+		s.sweep()
+		if items := s.existingRoom("room").list(); len(items) != 2 {
+			t.Fatalf("expiry sweep persisted while pending journal existed: %#v", items)
+		}
+		restarted := newTestServer(t)
+		restarted.stateDir = s.stateDir
+		restarted.load()
+		items := restarted.existingRoom("room").list()
+		if len(items) != 2 || items[0].ID != keep.ID || items[1].ID != remove.ID || items[0].Pinned {
+			t.Fatalf("pending recovery discarded or accepted an action: %#v", items)
+		}
+	})
+
+	t.Run("committed journal restores candidate state without accepting newer actions", func(t *testing.T) {
+		s, keep, remove, previous, candidate := makeServer(t)
+		candidateDump, err := decodeSnapshot(candidate)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.saveSnapshot(candidateDump); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.writeDeleteTransaction(deleteTransaction{Version: 1, State: "committed", Previous: previous, Candidate: candidate, Removal: deletionRecovery{Room: "room", Item: remove}}); err != nil {
+			t.Fatal(err)
+		}
+		assertBlocked(t, s, keep)
+		s.ttl = -time.Second
+		s.sweep()
+		if items := s.existingRoom("room").list(); len(items) != 2 {
+			t.Fatalf("expiry sweep persisted while committed journal existed: %#v", items)
+		}
+		restarted := newTestServer(t)
+		restarted.stateDir = s.stateDir
+		restarted.load()
+		items := restarted.existingRoom("room").list()
+		if len(items) != 1 || items[0].ID != keep.ID || items[0].Pinned {
+			t.Fatalf("committed recovery discarded or accepted an action: %#v", items)
+		}
+	})
+}
+
+func TestDeleteTransactionPreflightPreventsUploadAndPushSideEffects(t *testing.T) {
+	for _, state := range []string{"pending", "committed"} {
+		t.Run(state, func(t *testing.T) {
+			s := newTestServer(t)
+			keep := testItem("keep", "keep")
+			remove := testItem("remove", "remove")
+			mustAddToRoom(t, s, "room", keep)
+			mustAddToRoom(t, s, "room", remove)
+			if err := s.save(); err != nil {
+				t.Fatal(err)
+			}
+			previous, err := os.ReadFile(s.persistPath())
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, replacement, found := s.existingRoom("room").removalPlan(remove.ID)
+			if !found {
+				t.Fatal("target missing")
+			}
+			candidateDump := s.snapshot()
+			candidateDump["room"] = replacement
+			candidate, err := json.Marshal(candidateDump)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			// Build an existing staging session before the transaction. It must
+			// remain a valid staging file while chunk and completion are blocked,
+			// then Abort must still be able to clean it up.
+			start := httptest.NewRequest(http.MethodPost, "/upload/start?room=room", nil)
+			start.Header.Set("X-Size", "4")
+			start.Header.Set("X-Mime", "application/octet-stream")
+			start.Header.Set("X-Name", "staged.bin")
+			startResult := httptest.NewRecorder()
+			s.handler().ServeHTTP(startResult, start)
+			if startResult.Code != http.StatusOK {
+				t.Fatalf("initial upload start = %d, body=%s", startResult.Code, startResult.Body.String())
+			}
+			var started struct {
+				Upload string `json:"upload"`
+			}
+			if err := json.NewDecoder(startResult.Body).Decode(&started); err != nil {
+				t.Fatal(err)
+			}
+			s.mu.Lock()
+			staged := s.uploads[started.Upload]
+			s.mu.Unlock()
+			if staged == nil {
+				t.Fatal("initial upload was not registered")
+			}
+			stagingPath, finalPath := staged.path, s.blobPath(staged.room, staged.item.ID)
+
+			if state == "committed" {
+				if err := s.saveSnapshot(candidateDump); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := s.writeDeleteTransaction(deleteTransaction{
+				Version:   1,
+				State:     state,
+				Previous:  previous,
+				Candidate: candidate,
+				Removal:   deletionRecovery{Room: "room", Item: remove},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			beforeQuota := atomic.LoadInt64(&totalBytes)
+
+			assertBlocked := func(name string, req *http.Request) {
+				t.Helper()
+				result := httptest.NewRecorder()
+				s.handler().ServeHTTP(result, req)
+				if result.Code != http.StatusServiceUnavailable || result.Header().Get("X-Clipsync-Persistence") != "uncertain" {
+					t.Fatalf("%s under %s journal = %d/%q, body=%s", name, state, result.Code, result.Header().Get("X-Clipsync-Persistence"), result.Body.String())
+				}
+			}
+
+			inline := httptest.NewRequest(http.MethodPost, "/push?room=room", strings.NewReader("blocked inline"))
+			inline.Header.Set("X-Kind", "text")
+			assertBlocked("inline push", inline)
+			file := httptest.NewRequest(http.MethodPost, "/push?room=room", bytes.NewReader([]byte("blocked file")))
+			file.Header.Set("X-Kind", "file")
+			file.Header.Set("X-Mime", "application/octet-stream")
+			file.Header.Set("X-Name", "blocked.bin")
+			assertBlocked("file push", file)
+			image := httptest.NewRequest(http.MethodPost, "/push?room=room", bytes.NewReader([]byte("blocked image")))
+			image.Header.Set("X-Kind", "image")
+			image.Header.Set("X-Mime", "image/png")
+			assertBlocked("image push", image)
+			blockedStart := httptest.NewRequest(http.MethodPost, "/upload/start?room=room", nil)
+			blockedStart.Header.Set("X-Size", "4")
+			blockedStart.Header.Set("X-Mime", "application/octet-stream")
+			blockedStart.Header.Set("X-Name", "blocked-start.bin")
+			assertBlocked("upload start", blockedStart)
+			assertBlocked("upload chunk", httptest.NewRequest(http.MethodPost, "/upload/chunk?room=room&upload="+started.Upload+"&offset=0", strings.NewReader("data")))
+			assertBlocked("upload completion", httptest.NewRequest(http.MethodPost, "/upload/complete?room=room&upload="+started.Upload, nil))
+
+			if got := atomic.LoadInt64(&totalBytes); got != beforeQuota {
+				t.Fatalf("blocked operations changed quota = %d, want %d", got, beforeQuota)
+			}
+			if info, err := os.Stat(stagingPath); err != nil || info.Size() != 0 {
+				t.Fatalf("blocked chunk damaged staging file: info=%v err=%v", info, err)
+			}
+			if _, err := os.Stat(finalPath); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("blocked completion created final blob: %v", err)
+			}
+			if entries, err := os.ReadDir(filepath.Join(s.stateDir, "blobs")); err == nil && len(entries) != 0 {
+				t.Fatalf("blocked direct file/image push left blob directories: %#v", entries)
+			} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("could not inspect blob root after blocked pushes: %v", err)
+			}
+			s.mu.Lock()
+			registeredUploads := len(s.uploads)
+			active := s.uploads[started.Upload]
+			s.mu.Unlock()
+			if registeredUploads != 1 || active == nil || active.path != stagingPath {
+				t.Fatalf("blocked upload changed staging bookkeeping: count=%d upload=%#v", registeredUploads, active)
+			}
+
+			// Abort is deliberately outside the journal gate: it cannot persist
+			// metadata and is required to release this existing staging session.
+			abortResult := httptest.NewRecorder()
+			s.handler().ServeHTTP(abortResult, httptest.NewRequest(http.MethodPost, "/upload/abort?room=room&upload="+started.Upload, nil))
+			if abortResult.Code != http.StatusNoContent {
+				t.Fatalf("upload abort during journal = %d", abortResult.Code)
+			}
+			if _, err := os.Stat(stagingPath); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("abort left staged file: %v", err)
+			}
+			if got := atomic.LoadInt64(&totalBytes); got != beforeQuota {
+				t.Fatalf("abort after blocked chunk changed quota = %d, want %d", got, beforeQuota)
+			}
+
+			restarted := newTestServer(t)
+			restarted.stateDir = s.stateDir
+			restarted.load()
+			items := restarted.existingRoom("room").list()
+			if state == "pending" {
+				if len(items) != 2 || items[0].ID != keep.ID || items[1].ID != remove.ID {
+					t.Fatalf("pending restart retained a blocked action or lost prior data: %#v", items)
+				}
+			} else if len(items) != 1 || items[0].ID != keep.ID {
+				t.Fatalf("committed restart retained a blocked action or lost candidate data: %#v", items)
+			}
+		})
+	}
+}
+
+func TestDeleteItemRequiresAuthenticatedValidPostRequest(t *testing.T) {
+	s := newTestServer(t)
+	s.authToken = "test-token"
+	mustAddToRoom(t, s, "room", testItem("stored", "keep"))
+
+	tests := []struct {
+		name string
+		req  *http.Request
+		want int
+	}{
+		{"authentication", localRequest(http.MethodPost, "/delete?room=room&id=stored", nil), http.StatusUnauthorized},
+		{"method", authenticatedRequest(s, http.MethodGet, "/delete?room=room&id=stored", nil), http.StatusMethodNotAllowed},
+		{"missing room", authenticatedRequest(s, http.MethodPost, "/delete?id=stored", nil), http.StatusBadRequest},
+		{"missing id", authenticatedRequest(s, http.MethodPost, "/delete?room=room", nil), http.StatusBadRequest},
+		{"unknown room", authenticatedRequest(s, http.MethodPost, "/delete?room=missing&id=stored", nil), http.StatusNotFound},
+		{"unknown item", authenticatedRequest(s, http.MethodPost, "/delete?room=room&id=missing", nil), http.StatusNotFound},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result := httptest.NewRecorder()
+			s.handler().ServeHTTP(result, test.req)
+			if result.Code != test.want {
+				t.Fatalf("status = %d, want %d", result.Code, test.want)
+			}
+		})
+	}
+	items := s.existingRoom("room").list()
+	if len(items) != 1 || items[0].ID != "stored" {
+		t.Fatalf("rejected delete changed data: %#v", items)
+	}
+}
+
 func TestClearAllRequiresAuthenticationPostAndConfirmation(t *testing.T) {
 	s := newTestServer(t)
 	s.authToken = "test-token"
@@ -1378,6 +2210,91 @@ func TestClearAllPersistenceFailureKeepsFinalizedBlobsRestartable(t *testing.T) 
 	}
 }
 
+func TestClearOperationsKeepBlobsWhenFinalBackupRefreshFails(t *testing.T) {
+	configureFinalBackupFailure := func(s *server) {
+		defaults := defaultPersistenceOps()
+		directorySyncs := 0
+		s.persistOps.sync = func(f *os.File) error {
+			info, err := f.Stat()
+			if err != nil {
+				return err
+			}
+			if info.IsDir() {
+				directorySyncs++
+				if directorySyncs == 3 {
+					return errors.New("injected backup post-rename directory sync failure")
+				}
+			}
+			return defaults.sync(f)
+		}
+	}
+	seed := func(t *testing.T, s *server) (string, int64) {
+		t.Helper()
+		id := nextID()
+		size, err := s.writeBlob("room", id, bytes.NewReader([]byte("survive failed backup refresh")), 64)
+		if err != nil {
+			t.Fatal(err)
+		}
+		mustAddToRoom(t, s, "room", item{ID: id, Kind: "file", Mime: "application/octet-stream", Name: "keep.bin", Size: size, At: 1})
+		if err := s.save(); err != nil {
+			t.Fatal(err)
+		}
+		return id, size
+	}
+	restartHasItem := func(t *testing.T, s *server, id string, size int64) {
+		t.Helper()
+		if _, err := os.Stat(s.blobPath("room", id)); err != nil {
+			t.Fatalf("clear removed blob before both snapshots were durable: %v", err)
+		}
+		restarted := newTestServer(t)
+		restarted.stateDir = s.stateDir
+		restarted.load()
+		items := restarted.existingRoom("room").list()
+		if len(items) != 1 || items[0].ID != id {
+			t.Fatalf("restart after failed backup refresh items = %#v", items)
+		}
+		if got := atomic.LoadInt64(&totalBytes); got != size {
+			t.Fatalf("restart quota = %d, want %d", got, size)
+		}
+		if err := os.WriteFile(s.persistPath(), []byte("corrupt primary"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		fallback := newTestServer(t)
+		fallback.stateDir = s.stateDir
+		fallback.load()
+		fallbackItems := fallback.existingRoom("room").list()
+		if len(fallbackItems) != 1 || fallbackItems[0].ID != id {
+			t.Fatalf("backup recovery after failed clear items = %#v", fallbackItems)
+		}
+	}
+
+	t.Run("room clear", func(t *testing.T) {
+		s := newTestServer(t)
+		id, size := seed(t, s)
+		configureFinalBackupFailure(s)
+		result := httptest.NewRecorder()
+		s.handler().ServeHTTP(result, httptest.NewRequest(http.MethodPost, "/clear?room=room", nil))
+		if result.Code != http.StatusServiceUnavailable {
+			t.Fatalf("clear status = %d, want %d", result.Code, http.StatusServiceUnavailable)
+		}
+		restartHasItem(t, s, id, size)
+	})
+
+	t.Run("global clear", func(t *testing.T) {
+		s := newTestServer(t)
+		id, size := seed(t, s)
+		configureFinalBackupFailure(s)
+		req := localRequest(http.MethodPost, "/admin/clear-all", nil)
+		req.Header.Set("X-Clipsync-Confirm", clearAllConfirmation)
+		result := httptest.NewRecorder()
+		s.handler().ServeHTTP(result, req)
+		if result.Code != http.StatusServiceUnavailable {
+			t.Fatalf("global clear status = %d, want %d", result.Code, http.StatusServiceUnavailable)
+		}
+		restartHasItem(t, s, id, size)
+	})
+}
+
 func TestClientIdentityTrustsOnlyConfiguredCloudflaredPeer(t *testing.T) {
 	s := newTestServer(t)
 	trusted, err := parseTrustedProxies("172.30.0.3/32")
@@ -1488,6 +2405,7 @@ func TestLoginAndMutationRoutesAreRateLimited(t *testing.T) {
 		{"upload complete", http.MethodPost, "/upload/complete?upload=missing", nil},
 		{"upload abort", http.MethodPost, "/upload/abort?upload=missing", nil},
 		{"pin", http.MethodPost, "/pin?room=shared-room&id=missing", nil},
+		{"delete", http.MethodPost, "/delete?room=shared-room&id=missing", nil},
 		{"clear", http.MethodPost, "/clear?room=shared-room", nil},
 	}
 	for _, route := range routes {
@@ -1603,6 +2521,7 @@ func TestRoomNameValidationAndBrowserCompatibleCodes(t *testing.T) {
 		{http.MethodPost, "/push?room=bad%2Froom", func(req *http.Request) { req.Header.Set("X-Kind", "text") }},
 		{http.MethodPost, "/upload/start?room=bad%2Froom", func(req *http.Request) { req.Header.Set("X-Size", "0") }},
 		{http.MethodPost, "/pin?room=bad%2Froom&id=missing", nil},
+		{http.MethodPost, "/delete?room=bad%2Froom&id=missing", nil},
 		{http.MethodPost, "/clear?room=bad%2Froom", nil},
 		{http.MethodGet, "/item?room=bad%2Froom&id=missing", nil},
 		{http.MethodGet, "/blob?room=bad%2Froom&id=missing", nil},
@@ -1651,6 +2570,7 @@ func TestPassiveRoomRoutesDoNotCreateRooms(t *testing.T) {
 		{http.MethodGet, "/item?room=missing&id=nope", http.StatusNotFound},
 		{http.MethodGet, "/blob?room=missing&id=nope", http.StatusNotFound},
 		{http.MethodPost, "/pin?room=missing&id=nope", http.StatusNotFound},
+		{http.MethodPost, "/delete?room=missing&id=nope", http.StatusNotFound},
 		{http.MethodPost, "/clear?room=missing", http.StatusOK},
 	}
 	for _, route := range routes {

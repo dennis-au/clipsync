@@ -36,10 +36,34 @@ class Element {
     return child;
   }
   removeChild(child) { this.children.splice(this.children.indexOf(child), 1); child.parentNode = null; }
+  replaceChild(next, previous) {
+    const index = this.children.indexOf(previous);
+    if (index >= 0) {
+      previous.parentNode = null;
+      next.parentNode = this;
+      this.children[index] = next;
+    }
+    return previous;
+  }
   remove() { if (this.parentNode) this.parentNode.removeChild(this); }
-  querySelector() { return null; }
+  querySelector(selector) {
+    const idMatch = selector.match(/^\.card\[data-id="(.+)"\]$/);
+    const matches = (element) => {
+      if (selector === '.card') return element.className.includes('card');
+      return idMatch && element.className.includes('card') && element.dataset.id === idMatch[1];
+    };
+    const visit = (element) => {
+      for (const child of element.children) {
+        if (matches(child)) return child;
+        const found = visit(child);
+        if (found) return found;
+      }
+      return null;
+    };
+    return visit(this);
+  }
   querySelectorAll(selector) { return selector === '.card' ? this.children.filter((child) => child.className.includes('card')) : []; }
-  click() { if (this.onclick) this.onclick({ preventDefault() {} }); }
+  click() { if (this.onclick) this.onclick({ preventDefault() {}, stopPropagation() {} }); }
 }
 
 function createHarness() {
@@ -96,19 +120,26 @@ function createHarness() {
     addEventListener(name, handler) { windowListeners[name] = handler; },
     confirm: () => true,
   };
+  const requests = [];
   const sandbox = {
     window, document, localStorage, location, EventSource, setTimeout: setTimeoutMock, clearTimeout: clearTimeoutMock,
-    fetch: () => Promise.resolve({ status: 200, ok: true, json: () => Promise.resolve({ items: [] }), text: () => Promise.resolve('') }),
+    fetch: (url, options = {}) => {
+      requests.push({ url, options });
+      const response = url.startsWith('list?') ? { items: [] } : { deleted: 'item-a' };
+      return Promise.resolve({ status: 200, ok: true, json: () => Promise.resolve(response), text: () => Promise.resolve('') });
+    },
     navigator: {}, crypto: window.crypto, Uint8Array, Blob, File: class File {}, console, JSON, Math, Date, RegExp, Array, Promise, encodeURIComponent, decodeURIComponent,
   };
   const page = fs.readFileSync(path.join(__dirname, '..', 'web.go'), 'utf8');
   const match = page.match(/<script>\n([\s\S]*?)\n<\/script>/);
   assert(match, 'could not extract the page script from web.go');
   vm.runInNewContext(match[1], sandbox, { filename: 'web.go:inline-script' });
-  return { elements, sources, advance };
+  return { elements, sources, advance, requests };
 }
 
-async function settle() { await Promise.resolve(); await Promise.resolve(); }
+async function settle() {
+  for (let index = 0; index < 8; index++) await Promise.resolve();
+}
 
 async function testRapidNewRoomClicks() {
   const page = createHarness();
@@ -141,8 +172,40 @@ async function testSequentialRoomChanges() {
   assert.equal(page.elements.status.textContent, 'Live', 'the later normal room must reach Live');
 }
 
+async function testDropAndIndividualDelete() {
+  const page = createHarness();
+  assert.equal(typeof page.elements.drop.listeners.drop, 'function', 'the real drop zone must retain a drop handler');
+  page.elements.drop.listeners.drop({ dataTransfer: { files: [] } });
+
+  page.elements.room.value = 'delete-room';
+  page.elements.join.click();
+  page.advance(250);
+  await settle();
+  const source = page.sources[0];
+  source.onmessage({ data: JSON.stringify({ kind: 'snapshot', items: [{ id: 'item-a', kind: 'text', text: 'remove', size: 6, from: 'test', at: 1 }] }) });
+  const card = page.elements.feed.querySelector('.card[data-id="item-a"]');
+  assert(card, 'snapshot item must render a card');
+  const deleteButton = card.children[1].children[2];
+  assert.equal(deleteButton.textContent, 'Delete', 'each card must expose a destructive Delete control');
+  deleteButton.click();
+  await settle();
+  const deleteRequest = page.requests.find((request) => request.url === 'delete?room=delete-room&id=item-a');
+  assert(deleteRequest, 'Delete control must POST to the item deletion endpoint');
+  assert.equal(deleteRequest.options.method, 'POST');
+  assert.equal(page.elements.feed.querySelector('.card[data-id="item-a"]'), null, 'successful deletion must remove only its card');
+  source.onmessage({ data: JSON.stringify({ kind: 'push', item: { id: 'item-a', kind: 'text', text: 'stale', size: 5, from: 'test', at: 1 } }) });
+  source.onmessage({ data: JSON.stringify({ kind: 'snapshot', items: [{ id: 'item-a', kind: 'text', text: 'stale', size: 5, from: 'test', at: 1 }] }) });
+  assert.equal(page.elements.feed.querySelector('.card[data-id="item-a"]'), null, 'stale events must not resurrect a deleted card');
+
+  source.onmessage({ data: JSON.stringify({ kind: 'push', item: { id: 'item-b', kind: 'text', text: 'keep', size: 4, from: 'test', at: 1 } }) });
+  assert(page.elements.feed.querySelector('.card[data-id="item-b"]'), 'unrelated item must remain visible');
+  source.onmessage({ data: JSON.stringify({ kind: 'delete', id: 'item-b' }) });
+  assert.equal(page.elements.feed.querySelector('.card[data-id="item-b"]'), null, 'delete SSE must remove exactly the selected card');
+}
+
 (async () => {
   await testRapidNewRoomClicks();
   await testSequentialRoomChanges();
-  console.log('PASS: room selection coalesces rapid clicks and preserves sequential room changes');
+  await testDropAndIndividualDelete();
+  console.log('PASS: room selection, drop registration, and individual deletion work through the real page script');
 })().catch((error) => { console.error(error.stack || error); process.exitCode = 1; });

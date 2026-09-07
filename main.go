@@ -108,8 +108,9 @@ func (it item) hasBlob() bool {
 }
 
 type sseEvent struct {
-	Kind string `json:"kind"` // "push" | "update" | "clear"
+	Kind string `json:"kind"` // "push" | "update" | "delete" | "clear"
 	Item item   `json:"item,omitempty"`
+	ID   string `json:"id,omitempty"`
 }
 
 type room struct {
@@ -255,6 +256,41 @@ func (r *room) clear() []item {
 	return removed
 }
 
+// removalPlan returns the item and its replacement list without changing the
+// room. The delete handler persists that replacement before committing it.
+func (r *room) removalPlan(id string) (item, []item, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i, it := range r.items {
+		if it.ID != id {
+			continue
+		}
+		replacement := make([]item, 0, len(r.items)-1)
+		replacement = append(replacement, r.items[:i]...)
+		replacement = append(replacement, r.items[i+1:]...)
+		return it, replacement, true
+	}
+	return item{}, nil, false
+}
+
+// commitRemoval is called only after the planned metadata snapshot is durable.
+// mutationMu serializes content changes, so the previously planned item remains
+// available until this point.
+func (r *room) commitRemoval(id string) (item, bool) {
+	r.mu.Lock()
+	for i, it := range r.items {
+		if it.ID != id {
+			continue
+		}
+		r.items = append(r.items[:i], r.items[i+1:]...)
+		r.mu.Unlock()
+		r.broadcast(sseEvent{Kind: "delete", ID: id})
+		return it, true
+	}
+	r.mu.Unlock()
+	return item{}, false
+}
+
 // prune elimina items caducados NO fijados; devuelve los eliminados.
 func (r *room) prune(cutoff int64) []item {
 	r.mu.Lock()
@@ -373,6 +409,7 @@ func (l *limiter) evictOldestLocked() {
 type server struct {
 	mu                      sync.Mutex
 	globalMutationMu        sync.RWMutex
+	deleteTxnMu             sync.Mutex
 	mutationMu              sync.Mutex
 	persistMu               sync.Mutex
 	rooms                   map[string]*room
@@ -413,6 +450,24 @@ type server struct {
 type pendingRemoval struct {
 	room string
 	item item
+}
+
+// deletionRecovery is intentionally separate from pendingRemoval: its fields
+// must survive JSON serialization so startup can finish one committed deletion.
+type deletionRecovery struct {
+	Room string `json:"room"`
+	Item item   `json:"item"`
+}
+
+// deleteTransaction records the old and candidate metadata before an item
+// deletion touches either replica. A pending transaction rolls back on startup;
+// a committed transaction keeps the candidate snapshot and retries blob cleanup.
+type deleteTransaction struct {
+	Version   int              `json:"version"`
+	State     string           `json:"state"`
+	Previous  []byte           `json:"previous"`
+	Candidate []byte           `json:"candidate"`
+	Removal   deletionRecovery `json:"removal"`
 }
 
 // persistenceOps keeps filesystem failures testable without changing the
@@ -1062,6 +1117,10 @@ func (s *server) persistPath() string { return filepath.Join(s.stateDir, "items.
 
 func (s *server) persistBackupPath() string { return filepath.Join(s.stateDir, "items.json.bak") }
 
+func (s *server) deleteTransactionPath() string {
+	return filepath.Join(s.stateDir, "items.json.delete-txn")
+}
+
 func (s *server) removeSnapshotTemps() error {
 	entries, err := os.ReadDir(s.stateDir)
 	if err != nil {
@@ -1079,6 +1138,10 @@ func (s *server) removeSnapshotTemps() error {
 }
 
 var errNoPersistedSnapshot = errors.New("no persisted snapshot")
+
+// errPrimarySnapshotInstalled means a new primary snapshot was installed but
+// the known prior metadata could not be restored to both replicas.
+var errPrimarySnapshotInstalled = errors.New("primary snapshot installed and rollback failed")
 
 func (s *server) snapshot() map[string][]item {
 	s.mu.Lock()
@@ -1234,13 +1297,120 @@ func (s *server) replaceSnapshot(destination string, data []byte) error {
 	return err
 }
 
-// save serializes both snapshot capture and installation. A later mutation can
-// never install an older snapshot after a newer one.
-func (s *server) save() error {
+func (s *server) writeDeleteTransaction(tx deleteTransaction) error {
+	data, err := json.Marshal(tx)
+	if err != nil {
+		return fmt.Errorf("encode deletion transaction: %w", err)
+	}
+	if err := s.replaceSnapshot(s.deleteTransactionPath(), data); err != nil {
+		return fmt.Errorf("write deletion transaction: %w", err)
+	}
+	return nil
+}
+
+func (s *server) readDeleteTransaction() (deleteTransaction, error) {
+	data, err := s.persistence().readFile(s.deleteTransactionPath())
+	if err != nil {
+		return deleteTransaction{}, err
+	}
+	var tx deleteTransaction
+	if err := json.Unmarshal(data, &tx); err != nil {
+		return deleteTransaction{}, fmt.Errorf("decode deletion transaction: %w", err)
+	}
+	if tx.Version != 1 || (tx.State != "pending" && tx.State != "committed") {
+		return deleteTransaction{}, errors.New("invalid deletion transaction")
+	}
+	if _, err := decodeSnapshot(tx.Previous); err != nil {
+		return deleteTransaction{}, fmt.Errorf("decode deletion transaction previous snapshot: %w", err)
+	}
+	if _, err := decodeSnapshot(tx.Candidate); err != nil {
+		return deleteTransaction{}, fmt.Errorf("decode deletion transaction candidate snapshot: %w", err)
+	}
+	if !validRoomName(tx.Removal.Room, s.maxRoomNameBytes) || tx.Removal.Item.ID == "" || sanitize(tx.Removal.Item.ID) != tx.Removal.Item.ID {
+		return deleteTransaction{}, errors.New("invalid deletion transaction cleanup record")
+	}
+	return tx, nil
+}
+
+// allowPersistedMutation is called while mutationMu is held. A deletion
+// transaction captures complete snapshots, so accepting any newer metadata
+// mutation before it is resolved would make the transaction stale on restart.
+func (s *server) allowPersistedMutation(w http.ResponseWriter) bool {
+	if _, err := s.readDeleteTransaction(); err == nil {
+		w.Header().Set("X-Clipsync-Persistence", "uncertain")
+		http.Error(w, "a previous deletion needs recovery; restart ClipSync before retrying", http.StatusServiceUnavailable)
+		return false
+	} else if !errors.Is(err, os.ErrNotExist) {
+		log.Printf("could not inspect previous deletion transaction: %v", err)
+		w.Header().Set("X-Clipsync-Persistence", "uncertain")
+		http.Error(w, "a previous deletion needs recovery; restart ClipSync before retrying", http.StatusServiceUnavailable)
+		return false
+	}
+	return true
+}
+
+func (s *server) deleteTransactionPending() (bool, error) {
+	_, err := s.readDeleteTransaction()
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	return true, err
+}
+
+func (s *server) removeDeleteTransaction() error {
+	err := s.persistence().remove(s.deleteTransactionPath())
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("remove deletion transaction: %w", err)
+	}
+	if err := s.syncPersistDirectory(); err != nil {
+		return fmt.Errorf("sync deletion transaction removal: %w", err)
+	}
+	return nil
+}
+
+// restoreSnapshotPair makes the primary and fallback replica agree before an
+// interrupted mutation is reported as having failed.
+func (s *server) restoreSnapshotPair(data []byte) error {
+	primaryErr := s.replaceSnapshot(s.persistPath(), data)
+	backupErr := s.replaceSnapshot(s.persistBackupPath(), data)
+	if primaryErr == nil && backupErr == nil {
+		return nil
+	}
+	return fmt.Errorf("restore metadata replicas: primary=%v; backup=%v", primaryErr, backupErr)
+}
+
+// recoverDeleteTransaction resolves the durable intent before loading state or
+// returning a deletion failure. A pending transaction restores the old pair;
+// a committed one repairs the candidate pair and removes its now-safe blob.
+func (s *server) recoverDeleteTransaction() error {
+	tx, err := s.readDeleteTransaction()
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if tx.State == "pending" {
+		if err := s.restoreSnapshotPair(tx.Previous); err != nil {
+			return fmt.Errorf("recover pending deletion: %w", err)
+		}
+		return s.removeDeleteTransaction()
+	}
+	if err := s.restoreSnapshotPair(tx.Candidate); err != nil {
+		return fmt.Errorf("recover committed deletion: %w", err)
+	}
+	return s.cleanupRecoveredDeletion(tx.Removal)
+}
+
+// saveSnapshot serializes snapshot installation. A later mutation can never
+// install an older snapshot after a newer one.
+func (s *server) saveSnapshot(dump map[string][]item) error {
 	s.persistMu.Lock()
 	defer s.persistMu.Unlock()
 
-	dump := s.snapshot()
 	data, err := json.Marshal(dump)
 	if err != nil {
 		return fmt.Errorf("encode metadata snapshot: %w", err)
@@ -1276,6 +1446,16 @@ func (s *server) save() error {
 			_ = s.persistence().remove(primaryTmp)
 		}
 	}()
+	restorePrevious := func(cause error) error {
+		if !hadValidPrimary {
+			return fmt.Errorf("%w: %v", errPrimarySnapshotInstalled, cause)
+		}
+		if restoreErr := s.restoreSnapshotPair(previous); restoreErr == nil {
+			return fmt.Errorf("metadata persistence failed but both replicas were restored: %w", cause)
+		} else {
+			return fmt.Errorf("%w: %v; metadata rollback failed: %v", errPrimarySnapshotInstalled, cause, restoreErr)
+		}
+	}
 
 	// Preserve the previous valid primary while the replacement is being installed.
 	if hadValidPrimary {
@@ -1286,15 +1466,22 @@ func (s *server) save() error {
 	installed, err := s.installSnapshot(primaryTmp, primaryPath)
 	primaryInstalled = installed
 	if err != nil {
+		if primaryInstalled {
+			return restorePrevious(fmt.Errorf("install primary snapshot: %w", err))
+		}
 		return fmt.Errorf("install metadata snapshot: %w", err)
 	}
 	// A successful backup must describe the same metadata as the primary. Blob
 	// cleanup happens only after save returns, so either snapshot remains fully
 	// usable if the other one is lost or corrupted.
 	if err := s.replaceSnapshot(backupPath, data); err != nil {
-		return fmt.Errorf("metadata saved but backup refresh failed: %w", err)
+		return restorePrevious(fmt.Errorf("refresh backup snapshot: %w", err))
 	}
 	return nil
+}
+
+func (s *server) save() error {
+	return s.saveSnapshot(s.snapshot())
 }
 
 // persistMutation makes a failed durable write explicit. The already-applied
@@ -1311,7 +1498,20 @@ func (s *server) persistMutation(w http.ResponseWriter, action string) bool {
 	return true
 }
 
+func (s *server) cleanupRecoveredDeletion(removal deletionRecovery) error {
+	if removal.Item.hasBlob() {
+		if err := os.Remove(s.itemBlobPath(removal.Room, removal.Item)); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("clean committed deletion blob: %w", err)
+		}
+	}
+	return s.removeDeleteTransaction()
+}
+
 func (s *server) load() {
+	if err := s.recoverDeleteTransaction(); err != nil {
+		log.Printf("could not recover interrupted deletion: %v", err)
+		return
+	}
 	dump, recoveredFromBackup, err := s.loadSnapshot()
 	if errors.Is(err, errNoPersistedSnapshot) {
 		if err := s.removeOrphanTextBlobs(map[string]struct{}{}); err != nil {
@@ -1562,8 +1762,18 @@ func countUnpinned(items []item) int {
 // barrido periódico: caducidad (respeta pins) + limpieza de salas vacías
 func (s *server) sweep() {
 	s.expireUploads()
+	s.globalMutationMu.RLock()
+	defer s.globalMutationMu.RUnlock()
+	s.deleteTxnMu.Lock()
+	defer s.deleteTxnMu.Unlock()
 	s.mutationMu.Lock()
 	defer s.mutationMu.Unlock()
+	if pending, err := s.deleteTransactionPending(); err != nil {
+		log.Printf("could not inspect deletion transaction before expiry sweep: %v", err)
+		return
+	} else if pending {
+		return
+	}
 	cutoff := time.Now().Add(-s.ttl).Unix()
 	s.mu.Lock()
 	rooms := map[string]*room{}
@@ -1872,6 +2082,9 @@ func (s *server) handlePush(w http.ResponseWriter, req *http.Request) {
 	}
 	s.mutationMu.Lock()
 	defer s.mutationMu.Unlock()
+	if !s.allowPersistedMutation(w) {
+		return
+	}
 	evicted, err := s.addToRoom(rm, it)
 	if err != nil {
 		s.removeBlob(rm, it)
@@ -2148,6 +2361,9 @@ func (s *server) handleUploadComplete(w http.ResponseWriter, req *http.Request) 
 	}
 	s.mutationMu.Lock()
 	defer s.mutationMu.Unlock()
+	if !s.allowPersistedMutation(w) {
+		return
+	}
 	evicted, err := s.addToRoom(u.room, u.item)
 	if err != nil {
 		_ = os.Remove(s.blobPath(u.room, u.item.ID))
@@ -2215,6 +2431,9 @@ func (s *server) handlePin(w http.ResponseWriter, req *http.Request) {
 	pin := req.URL.Query().Get("pin") != "0"
 	s.mutationMu.Lock()
 	defer s.mutationMu.Unlock()
+	if !s.allowPersistedMutation(w) {
+		return
+	}
 	r := s.existingRoom(rm)
 	if r == nil {
 		http.NotFound(w, req)
@@ -2248,6 +2467,9 @@ func (s *server) handleClear(w http.ResponseWriter, req *http.Request) {
 
 	s.mutationMu.Lock()
 	defer s.mutationMu.Unlock()
+	if !s.allowPersistedMutation(w) {
+		return
+	}
 	r := s.existingRoom(rm)
 	cleared := 0
 	if r != nil {
@@ -2261,6 +2483,111 @@ func (s *server) handleClear(w http.ResponseWriter, req *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]int{"cleared": cleared})
+}
+
+func (s *server) handleDelete(w http.ResponseWriter, req *http.Request) {
+	if req.Method != http.MethodPost {
+		http.Error(w, "method", http.StatusMethodNotAllowed)
+		return
+	}
+	rm, roomOK := s.requestRoom(w, req)
+	id := req.URL.Query().Get("id")
+	if !roomOK {
+		return
+	}
+	if id == "" {
+		http.Error(w, "missing parameters", http.StatusBadRequest)
+		return
+	}
+
+	s.mutationMu.Lock()
+	defer s.mutationMu.Unlock()
+	if !s.allowPersistedMutation(w) {
+		return
+	}
+	r := s.existingRoom(rm)
+	if r == nil {
+		http.NotFound(w, req)
+		return
+	}
+	planned, replacement, found := r.removalPlan(id)
+	if !found {
+		http.NotFound(w, req)
+		return
+	}
+	dump := s.snapshot()
+	if len(replacement) == 0 {
+		delete(dump, rm)
+	} else {
+		dump[rm] = replacement
+	}
+	previous, err := json.Marshal(s.snapshot())
+	if err != nil {
+		log.Printf("could not stage item deletion: %v", err)
+		http.Error(w, "could not stage deletion", http.StatusInternalServerError)
+		return
+	}
+	candidate, err := json.Marshal(dump)
+	if err != nil {
+		log.Printf("could not stage item deletion: %v", err)
+		http.Error(w, "could not stage deletion", http.StatusInternalServerError)
+		return
+	}
+	tx := deleteTransaction{
+		Version:   1,
+		State:     "pending",
+		Previous:  previous,
+		Candidate: candidate,
+		Removal:   deletionRecovery{Room: rm, Item: planned},
+	}
+	if err := s.writeDeleteTransaction(tx); err != nil {
+		log.Printf("could not durably stage item deletion: %v", err)
+		w.Header().Set("X-Clipsync-Persistence", "uncertain")
+		http.Error(w, "deletion outcome is uncertain; restart ClipSync before retrying", http.StatusServiceUnavailable)
+		return
+	}
+	if err := s.saveSnapshot(dump); err != nil {
+		log.Printf("metadata persistence failed before item delete: %v", err)
+		if errors.Is(err, errPrimarySnapshotInstalled) {
+			w.Header().Set("X-Clipsync-Persistence", "uncertain")
+			http.Error(w, "deletion outcome is uncertain; restart ClipSync before retrying", http.StatusServiceUnavailable)
+			return
+		}
+		if cleanupErr := s.removeDeleteTransaction(); cleanupErr != nil {
+			log.Printf("could not clear rolled-back deletion transaction: %v", cleanupErr)
+		}
+		w.Header().Set("X-Clipsync-Persistence", "failed")
+		http.Error(w, "could not durably save deletion; nothing changed; try again", http.StatusServiceUnavailable)
+		return
+	}
+	tx.State = "committed"
+	if err := s.writeDeleteTransaction(tx); err != nil {
+		// The candidate pair is durable, but the commit marker was not. The
+		// pending transaction is intentionally left for startup to roll back;
+		// callers must not assume either outcome until that recovery completes.
+		log.Printf("could not commit staged item deletion: %v", err)
+		w.Header().Set("X-Clipsync-Persistence", "uncertain")
+		http.Error(w, "deletion outcome is uncertain; restart ClipSync before retrying", http.StatusServiceUnavailable)
+		return
+	}
+	removed, committed := r.commitRemoval(id)
+	if !committed {
+		log.Printf("item %s disappeared after its deletion snapshot was saved", id)
+		http.Error(w, "deletion saved but could not update room; refresh", http.StatusInternalServerError)
+		return
+	}
+	s.queueRemovals(rm, []item{removed})
+	s.flushPersistedRemovals()
+	s.removeEmptyRoom(rm, r)
+	if len(s.pendingRemovals) == 0 {
+		if err := s.removeDeleteTransaction(); err != nil {
+			// The committed record remains safe to replay, so deletion still
+			// succeeds and startup can retry cleanup after a crash.
+			log.Printf("could not remove completed deletion transaction: %v", err)
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"deleted": id})
 }
 
 type clearAllResult struct {
@@ -2342,8 +2669,13 @@ func (s *server) handleDeleteRooms(w http.ResponseWriter, req *http.Request) {
 
 	s.globalMutationMu.Lock()
 	defer s.globalMutationMu.Unlock()
+	s.deleteTxnMu.Lock()
+	defer s.deleteTxnMu.Unlock()
 	s.mutationMu.Lock()
 	defer s.mutationMu.Unlock()
+	if !s.allowPersistedMutation(w) {
+		return
+	}
 
 	s.mu.Lock()
 	rooms := make(map[string]*room, len(selected))
@@ -2400,8 +2732,13 @@ func (s *server) handleClearAll(w http.ResponseWriter, req *http.Request) {
 	// interval between the empty metadata snapshot and physical file deletion.
 	s.globalMutationMu.Lock()
 	defer s.globalMutationMu.Unlock()
+	s.deleteTxnMu.Lock()
+	defer s.deleteTxnMu.Unlock()
 	s.mutationMu.Lock()
 	defer s.mutationMu.Unlock()
+	if !s.allowPersistedMutation(w) {
+		return
+	}
 
 	s.mu.Lock()
 	rooms := make(map[string]*room, len(s.rooms))
@@ -2574,7 +2911,16 @@ func (s *server) handleEvents(w http.ResponseWriter, req *http.Request) {
 		case <-ctx.Done():
 			return
 		case ev := <-ch:
-			ev.Item = s.textView(rm, ev.Item)
+			if ev.Kind == "delete" {
+				writeSSE(w, fl, struct {
+					Kind string `json:"kind"`
+					ID   string `json:"id"`
+				}{Kind: "delete", ID: ev.ID})
+				continue
+			}
+			if ev.Kind == "push" || ev.Kind == "update" {
+				ev.Item = s.textView(rm, ev.Item)
+			}
 			writeSSE(w, fl, ev)
 		case <-ping.C:
 			fmt.Fprintf(w, ": ping\n\n")
@@ -2693,17 +3039,33 @@ func (s *server) handler() http.Handler {
 			h(w, req)
 		}))
 	}
+	persisting := func(h http.HandlerFunc) http.HandlerFunc {
+		return s.requireAuth(s.requireRateLimit(s.mutationLimiter, func(w http.ResponseWriter, req *http.Request) {
+			s.globalMutationMu.RLock()
+			defer s.globalMutationMu.RUnlock()
+			s.deleteTxnMu.Lock()
+			defer s.deleteTxnMu.Unlock()
+			// This must happen before h reads a request body, creates staging,
+			// reserves quota, or writes a final blob. The transaction lock is
+			// held until h returns, so a delete cannot race in afterward.
+			if !s.allowPersistedMutation(w) {
+				return
+			}
+			h(w, req)
+		}))
+	}
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("ok")) })
 	mux.HandleFunc("/login", s.requireRateLimit(s.loginLimiter, s.handleLogin))
 	mux.HandleFunc("/logout", s.requireAuth(s.handleLogout))
 	mux.HandleFunc("/list", s.requireAuth(s.handleList))
-	mux.HandleFunc("/push", mutating(s.handlePush))
-	mux.HandleFunc("/upload/start", mutating(s.handleUploadStart))
-	mux.HandleFunc("/upload/chunk", mutating(s.handleUploadChunk))
-	mux.HandleFunc("/upload/complete", mutating(s.handleUploadComplete))
+	mux.HandleFunc("/push", persisting(s.handlePush))
+	mux.HandleFunc("/upload/start", persisting(s.handleUploadStart))
+	mux.HandleFunc("/upload/chunk", persisting(s.handleUploadChunk))
+	mux.HandleFunc("/upload/complete", persisting(s.handleUploadComplete))
 	mux.HandleFunc("/upload/abort", mutating(s.handleUploadAbort))
-	mux.HandleFunc("/pin", mutating(s.handlePin))
-	mux.HandleFunc("/clear", mutating(s.handleClear))
+	mux.HandleFunc("/pin", persisting(s.handlePin))
+	mux.HandleFunc("/delete", persisting(s.handleDelete))
+	mux.HandleFunc("/clear", persisting(s.handleClear))
 	admin := func(h http.HandlerFunc) http.HandlerFunc {
 		return s.requireLocalAdmin(s.requireAuth(s.requireRateLimit(s.mutationLimiter, h)))
 	}

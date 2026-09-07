@@ -38,13 +38,7 @@ final class ProjectValidatorTests: XCTestCase {
     }
 
     func testStopArgumentsCannotDeletePersistentData() throws {
-        let project = try makeProject()
-        let validated = try ProjectValidator.validate(projectPath: project.path)
-        let arguments = DockerClient.composeArguments(
-            project: validated,
-            context: "default",
-            action: ["--profile", "tunnel", "stop", "--timeout", "30"]
-        )
+        let arguments = DockerClient.stopStackArguments()
 
         XCTAssertTrue(arguments.contains("stop"))
         XCTAssertFalse(arguments.contains("down"))
@@ -87,18 +81,31 @@ final class ProjectValidatorTests: XCTestCase {
     }
 
     func testPasswordRotationComposeArgumentsPreservePersistentData() throws {
-        let project = try makeProject()
-        let validated = try ProjectValidator.validate(projectPath: project.path)
-        let arguments = DockerClient.composeArguments(
-            project: validated,
-            context: "default",
-            action: ["--profile", "tunnel", "up", "-d", "--no-build", "--force-recreate"]
-        )
+        let arguments = DockerClient.applyPasswordChangeArguments()
 
         XCTAssertTrue(arguments.contains("--force-recreate"))
         XCTAssertFalse(arguments.contains("down"))
         XCTAssertFalse(arguments.contains("-v"))
         XCTAssertFalse(arguments.contains("rm"))
+    }
+
+    func testStartStackUsesTunnelProfileWithoutRemovingData() {
+        let arguments = DockerClient.startStackArguments()
+
+        XCTAssertEqual(arguments, ["--profile", "tunnel", "up", "-d", "--no-build"])
+        XCTAssertFalse(arguments.contains("down"))
+        XCTAssertFalse(arguments.contains("-v"))
+    }
+
+    func testTunnelLifecycleArgumentsTargetOnlyCloudflared() {
+        XCTAssertEqual(
+            DockerClient.startTunnelArguments(),
+            ["--profile", "tunnel", "up", "-d", "--no-build", "cloudflared"]
+        )
+        XCTAssertEqual(
+            DockerClient.restartTunnelArguments(),
+            ["--profile", "tunnel", "restart", "cloudflared"]
+        )
     }
 
     func testRoomDataListRunsAgainstContainerLoopbackWithHashedCookie() throws {

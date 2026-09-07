@@ -47,6 +47,14 @@ final class StatusStore: ObservableObject {
         Task { await perform(.restart) }
     }
 
+    func startTunnel() {
+        Task { await perform(.startTunnel) }
+    }
+
+    func restartTunnel() {
+        Task { await perform(.restartTunnel) }
+    }
+
     func prepareImages() {
         Task { await perform(.prepareImages) }
     }
@@ -162,6 +170,26 @@ final class StatusStore: ObservableObject {
                     return
                 }
                 await waitForLocalHealth(client: client, expectingHealthy: true)
+            case .startTunnel:
+                snapshot = .starting
+                detail = "Starting the Cloudflare tunnel. Stored room data is preserved."
+                let result = try await client.startTunnel()
+                guard result.exitCode == 0 else {
+                    snapshot = .imagesMissing
+                    detail = "Tunnel start failed. Prepare missing images explicitly, then try again."
+                    return
+                }
+                await waitForTunnel(client: client)
+            case .restartTunnel:
+                snapshot = .starting
+                detail = "Restarting the Cloudflare tunnel. Local ClipSync stays available."
+                let result = try await client.restartTunnel()
+                guard result.exitCode == 0 else {
+                    snapshot = .error("Cloudflare tunnel restart failed")
+                    detail = "The tunnel did not restart. Check Docker Desktop, then retry."
+                    return
+                }
+                await waitForTunnel(client: client)
             case .rotatePassword:
                 let password = try ClipSyncPasswordStore.generatePassword()
                 try ClipSyncPasswordStore.replacePassword(in: project, with: password)
@@ -215,38 +243,61 @@ final class StatusStore: ObservableObject {
         detail = "The command finished, but health did not settle within two minutes. Refresh or retry manually."
     }
 
-    private func updateSnapshot(client: DockerClient) async throws {
-        let services = try await client.serviceStates()
-        let clipboardRunning = services.contains { $0.service == "clipboard" && $0.state == "running" }
-        let tunnelRunning = services.contains { $0.service == "cloudflared" && $0.state == "running" }
-        let localHealthy = await HealthProbe.localHealthy()
+    private func waitForTunnel(client: DockerClient) async {
+        for _ in 0..<30 {
+            do {
+                let services = try await client.serviceStates()
+                let tunnelRunning = services.contains { $0.service == "cloudflared" && $0.state == "running" }
+                if tunnelRunning {
+                    try await updateSnapshot(client: client, services: services)
+                    return
+                }
+            } catch {
+                // The next poll may succeed while Compose finishes starting the service.
+            }
+            try? await Task.sleep(for: .seconds(2))
+        }
+        snapshot = .localHealthyTunnelStopped
+        detail = "The tunnel command finished, but cloudflared did not start within one minute. Check Docker Desktop, then retry."
+    }
 
-        guard clipboardRunning || localHealthy else {
-            snapshot = .off
-            detail = "The local stack is stopped."
-            return
-        }
-        guard localHealthy else {
-            snapshot = .clipboardUnhealthy
-            detail = "The clipboard container is running but its local health check is failing."
-            return
-        }
-        guard tunnelRunning else {
-            snapshot = .localHealthyTunnelStopped
-            detail = "Local ClipSync is healthy; the Cloudflare tunnel is stopped."
-            return
-        }
-        guard !settings.publicURL.isEmpty else {
-            snapshot = .localHealthyPublicUnverified
-            detail = "Local ClipSync and the tunnel process are running."
-            return
-        }
-        if await HealthProbe.publicHealthy(baseURL: settings.publicURL) {
-            snapshot = .publicReachable
-            detail = "Local ClipSync and the configured public endpoint are healthy."
+    private func updateSnapshot(client: DockerClient, services: [ComposeService]? = nil) async throws {
+        let currentServices: [ComposeService]
+        if let services {
+            currentServices = services
         } else {
-            snapshot = .publicUnreachable
+            currentServices = try await client.serviceStates()
+        }
+        let serviceState = StackServiceState(
+            clipboardRunning: currentServices.contains { $0.service == "clipboard" && $0.state == "running" },
+            tunnelRunning: currentServices.contains { $0.service == "cloudflared" && $0.state == "running" },
+            localHealthy: await HealthProbe.localHealthy()
+        )
+        let publicEndpointConfigured = !settings.publicURL.isEmpty
+        let publicEndpointHealthy = publicEndpointConfigured
+            ? await HealthProbe.publicHealthy(baseURL: settings.publicURL)
+            : nil
+        snapshot = StackStatus.classify(
+            services: serviceState,
+            publicEndpointConfigured: publicEndpointConfigured,
+            publicEndpointHealthy: publicEndpointHealthy
+        )
+
+        switch snapshot {
+        case .off:
+            detail = "The local stack is stopped."
+        case .clipboardUnhealthy:
+            detail = "The clipboard container is running but its local health check is failing."
+        case .localHealthyTunnelStopped:
+            detail = "Local ClipSync is healthy; the Cloudflare tunnel is stopped or unavailable."
+        case .localHealthyPublicUnverified:
+            detail = "Local ClipSync and the tunnel process are running."
+        case .publicUnreachable:
             detail = "Local ClipSync is healthy, but the public endpoint did not respond."
+        case .publicReachable:
+            detail = "Local ClipSync and the configured public endpoint are healthy."
+        default:
+            break
         }
     }
 
@@ -260,5 +311,7 @@ final class StatusStore: ObservableObject {
         case restart
         case rotatePassword
         case prepareImages
+        case startTunnel
+        case restartTunnel
     }
 }

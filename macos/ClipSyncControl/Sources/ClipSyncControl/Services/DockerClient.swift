@@ -69,15 +69,23 @@ struct DockerClient {
     }
 
     func start() async throws -> CommandResult {
-        try await compose(["--profile", "tunnel", "up", "-d", "--no-build"])
+        try await compose(Self.startStackArguments())
     }
 
     func stop() async throws -> CommandResult {
-        try await compose(["--profile", "tunnel", "stop", "--timeout", "30"])
+        try await compose(Self.stopStackArguments())
+    }
+
+    func startTunnel() async throws -> CommandResult {
+        try await compose(Self.startTunnelArguments())
+    }
+
+    func restartTunnel() async throws -> CommandResult {
+        try await compose(Self.restartTunnelArguments())
     }
 
     func applyPasswordChange() async throws -> CommandResult {
-        try await compose(["--profile", "tunnel", "up", "-d", "--no-build", "--force-recreate"])
+        try await compose(Self.applyPasswordChangeArguments())
     }
 
     func prepareMissingImages() async throws -> CommandResult {
@@ -101,6 +109,26 @@ struct DockerClient {
 
     static func clipboardExecArguments(_ arguments: [String]) -> [String] {
         ["exec", "-T", "clipboard"] + arguments
+    }
+
+    static func startStackArguments() -> [String] {
+        ["--profile", "tunnel", "up", "-d", "--no-build"]
+    }
+
+    static func stopStackArguments() -> [String] {
+        ["--profile", "tunnel", "stop", "--timeout", "30"]
+    }
+
+    static func startTunnelArguments() -> [String] {
+        ["--profile", "tunnel", "up", "-d", "--no-build", "cloudflared"]
+    }
+
+    static func restartTunnelArguments() -> [String] {
+        ["--profile", "tunnel", "restart", "cloudflared"]
+    }
+
+    static func applyPasswordChangeArguments() -> [String] {
+        ["--profile", "tunnel", "up", "-d", "--no-build", "--force-recreate"]
     }
 
     static func composeArguments(project: ValidatedProject, context: String, action: [String]) -> [String] {
