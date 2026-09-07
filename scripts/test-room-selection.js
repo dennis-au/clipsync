@@ -18,7 +18,13 @@ class Element {
     this.parentNode = null;
     this.listeners = {};
     this.checked = false;
-    this.classList = { add() {}, remove() {} };
+    this.clickCount = 0;
+    const classes = new Set();
+    this.classList = {
+      add: (...names) => names.forEach((name) => classes.add(name)),
+      remove: (...names) => names.forEach((name) => classes.delete(name)),
+      contains: (name) => classes.has(name),
+    };
   }
 
   set innerHTML(value) {
@@ -63,7 +69,10 @@ class Element {
     return visit(this);
   }
   querySelectorAll(selector) { return selector === '.card' ? this.children.filter((child) => child.className.includes('card')) : []; }
-  click() { if (this.onclick) this.onclick({ preventDefault() {}, stopPropagation() {} }); }
+  click() {
+    this.clickCount++;
+    if (this.onclick) this.onclick({ preventDefault() {}, stopPropagation() {} });
+  }
 }
 
 function createHarness() {
@@ -134,7 +143,7 @@ function createHarness() {
   const match = page.match(/<script>\n([\s\S]*?)\n<\/script>/);
   assert(match, 'could not extract the page script from web.go');
   vm.runInNewContext(match[1], sandbox, { filename: 'web.go:inline-script' });
-  return { elements, sources, advance, requests };
+  return { elements, sources, advance, requests, documentListeners };
 }
 
 async function settle() {
@@ -172,15 +181,78 @@ async function testSequentialRoomChanges() {
   assert.equal(page.elements.status.textContent, 'Live', 'the later normal room must reach Live');
 }
 
-async function testDropAndIndividualDelete() {
-  const page = createHarness();
-  assert.equal(typeof page.elements.drop.listeners.drop, 'function', 'the real drop zone must retain a drop handler');
-  page.elements.drop.listeners.drop({ dataTransfer: { files: [] } });
+function testUnifiedComposerMarkup() {
+  const page = fs.readFileSync(path.join(__dirname, '..', 'web.go'), 'utf8');
+  assert.match(page, /<div class="composer" id="drop">/, 'the composer must be the single drop target');
+  assert.match(page, /<textarea id="box"[^>]*aria-describedby="[^"]*compose-hint/, 'the composer must describe file dropping to assistive technology');
+  assert.doesNotMatch(page, /<div class="drop" id="drop">/, 'the standalone drop panel must be removed');
+}
 
-  page.elements.room.value = 'delete-room';
+function dragEvent(types, files) {
+  let prevented = false;
+  return {
+    event: {
+      dataTransfer: { types, files, dropEffect: 'none' },
+      preventDefault() { prevented = true; },
+    },
+    wasPrevented: () => prevented,
+  };
+}
+
+async function testUnifiedComposerDropAndExistingActions() {
+  const page = createHarness();
+  const drop = page.elements.drop;
+  assert.equal(typeof drop.listeners.drop, 'function', 'the composer must retain a drop handler');
+
+  const textDrag = dragEvent(['text/plain'], []);
+  drop.listeners.dragenter(textDrag.event);
+  drop.listeners.dragover(textDrag.event);
+  drop.listeners.drop(textDrag.event);
+  assert.equal(textDrag.wasPrevented(), false, 'text drags must retain native textarea behavior');
+  assert.equal(drop.classList.contains('hot'), false, 'text drags must not trigger the file-drop treatment');
+
+  const file = { name: 'dropped.png', type: 'image/png', size: 3 };
+  const outerEnter = dragEvent(['Files'], [file]);
+  drop.listeners.dragenter(outerEnter.event);
+  assert.equal(outerEnter.wasPrevented(), true, 'file drags must be accepted by the composer');
+  assert.equal(outerEnter.event.dataTransfer.dropEffect, 'copy', 'file drags must advertise copy semantics');
+  assert.equal(drop.classList.contains('hot'), true, 'file dragging over the composer must show the drop treatment');
+  const nestedEnter = dragEvent(['Files'], [file]);
+  drop.listeners.dragenter(nestedEnter.event);
+  const nestedLeave = dragEvent(['Files'], [file]);
+  drop.listeners.dragleave(nestedLeave.event);
+  assert.equal(drop.classList.contains('hot'), true, 'moving across composer children must not flicker the drop treatment');
+  const outerLeave = dragEvent(['Files'], [file]);
+  drop.listeners.dragleave(outerLeave.event);
+  assert.equal(drop.classList.contains('hot'), false, 'leaving the composer must clear the drop treatment');
+  const fallbackFileDrag = dragEvent([], [file]);
+  drop.listeners.dragenter(fallbackFileDrag.event);
+  assert.equal(fallbackFileDrag.wasPrevented(), true, 'file lists must be accepted when drag types are unavailable');
+  drop.listeners.dragleave(fallbackFileDrag.event);
+
+  page.elements.room.value = 'drop-room';
   page.elements.join.click();
   page.advance(250);
   await settle();
+  const droppedFile = dragEvent(['Files'], [file]);
+  drop.listeners.dragenter(droppedFile.event);
+  drop.listeners.drop(droppedFile.event);
+  await settle();
+  assert.equal(droppedFile.wasPrevented(), true, 'dropping files must prevent browser navigation');
+  assert.equal(drop.classList.contains('hot'), false, 'dropping files must clear the drop treatment');
+  const imageRequest = page.requests.find((request) => request.url === 'push?room=drop-room' && request.options.headers['X-Kind'] === 'image');
+  assert(imageRequest, 'dropped files must reach the existing upload pipeline');
+
+  page.elements.choose.click();
+  assert.equal(page.elements.files.clickCount, 1, 'Add files must retain its explicit file-picker fallback');
+  page.elements.box.value = 'manual text';
+  page.elements.send.click();
+  const sentText = page.requests.find((request) => request.url === 'push?room=drop-room' && request.options.headers['X-Kind'] === 'text');
+  assert(sentText, 'typing and Send text must retain the text submission path');
+  const paste = { clipboardData: { items: [], getData: () => 'pasted text' }, preventDefault() { this.prevented = true; } };
+  page.documentListeners.paste(paste);
+  assert.equal(paste.prevented, true, 'text pasting must retain the clipboard submission path');
+
   const source = page.sources[0];
   source.onmessage({ data: JSON.stringify({ kind: 'snapshot', items: [{ id: 'item-a', kind: 'text', text: 'remove', size: 6, from: 'test', at: 1 }] }) });
   const card = page.elements.feed.querySelector('.card[data-id="item-a"]');
@@ -189,7 +261,7 @@ async function testDropAndIndividualDelete() {
   assert.equal(deleteButton.textContent, 'Delete', 'each card must expose a destructive Delete control');
   deleteButton.click();
   await settle();
-  const deleteRequest = page.requests.find((request) => request.url === 'delete?room=delete-room&id=item-a');
+  const deleteRequest = page.requests.find((request) => request.url === 'delete?room=drop-room&id=item-a');
   assert(deleteRequest, 'Delete control must POST to the item deletion endpoint');
   assert.equal(deleteRequest.options.method, 'POST');
   assert.equal(page.elements.feed.querySelector('.card[data-id="item-a"]'), null, 'successful deletion must remove only its card');
@@ -201,11 +273,17 @@ async function testDropAndIndividualDelete() {
   assert(page.elements.feed.querySelector('.card[data-id="item-b"]'), 'unrelated item must remain visible');
   source.onmessage({ data: JSON.stringify({ kind: 'delete', id: 'item-b' }) });
   assert.equal(page.elements.feed.querySelector('.card[data-id="item-b"]'), null, 'delete SSE must remove exactly the selected card');
+
+  page.elements.clear.click();
+  await settle();
+  const clearRequest = page.requests.find((request) => request.url === 'clear?room=drop-room');
+  assert(clearRequest, 'Clear room must retain its room cleanup path');
 }
 
 (async () => {
   await testRapidNewRoomClicks();
   await testSequentialRoomChanges();
-  await testDropAndIndividualDelete();
-  console.log('PASS: room selection, drop registration, and individual deletion work through the real page script');
+  testUnifiedComposerMarkup();
+  await testUnifiedComposerDropAndExistingActions();
+  console.log('PASS: room selection, unified composer drop, and existing item actions work through the real page script');
 })().catch((error) => { console.error(error.stack || error); process.exitCode = 1; });
