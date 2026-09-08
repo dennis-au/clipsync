@@ -40,7 +40,7 @@ struct MenuContentView: View {
             }
         }
         .padding(16)
-        .frame(width: 350)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private var header: some View {
