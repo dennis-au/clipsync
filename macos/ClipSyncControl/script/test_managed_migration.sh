@@ -39,6 +39,7 @@ wait_for_health() {
 }
 
 docker info >/dev/null
+docker pull "$IMAGE" >/dev/null
 docker volume create "$VOLUME" >/dev/null
 # ClipSync runs as UID/GID 10001. Seed the external volume with the same ownership
 # and permissions it receives from the production image, rather than leaving a
