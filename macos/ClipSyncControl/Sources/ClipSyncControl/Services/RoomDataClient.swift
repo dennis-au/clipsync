@@ -23,9 +23,9 @@ struct RoomDataClient {
     private let password: String
     private let docker: DockerClient
 
-    init(project: ValidatedProject, preferredDockerPath: String, password: String) throws {
+    init(docker: DockerClient, password: String) {
         self.password = password
-        docker = try DockerClient(project: project, preferredExecutablePath: preferredDockerPath)
+        self.docker = docker
     }
 
     func listRooms() async throws -> [RoomDataSummary] {
@@ -125,7 +125,7 @@ struct RoomDataClient {
     private static func failureMessage(for result: CommandResult) -> String {
         let details = result.standardError.lowercased()
         if details.contains("401 unauthorized") {
-            return "The local ClipSync password no longer matches. Refresh approval or restart ClipSync."
+            return "The local ClipSync password no longer matches. Restart managed ClipSync to apply the current Keychain password."
         }
         if details.contains("404 not found") {
             return "This ClipSync service does not support room-data management yet."

@@ -72,7 +72,7 @@ cd macos/ClipSyncControl
 
 Approve the project folder in the utility's Settings before it can control Docker.
 For a release-ready Apple Silicon artifact, run
-`./macos/ClipSyncControl/script/package_release.sh 0.2.0`; it creates an ad-hoc
+`./macos/ClipSyncControl/script/package_release.sh 0.3.0`; it creates an ad-hoc
 signed developer ZIP under `macos/ClipSyncControl/dist/release/`. It is not
 notarized and macOS may ask the user to approve the first launch.
 

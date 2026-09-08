@@ -27,6 +27,7 @@ OUTPUT_DIR="$(cd "$(dirname "$OUTPUT_DIR")" && pwd)/$(basename "$OUTPUT_DIR")"
 APP_BUNDLE="$OUTPUT_DIR/$APP_NAME.app"
 APP_CONTENTS="$APP_BUNDLE/Contents"
 APP_MACOS="$APP_CONTENTS/MacOS"
+APP_RESOURCES="$APP_CONTENTS/Resources"
 ZIP_PATH="$OUTPUT_DIR/$APP_NAME-$VERSION-macos-arm64.zip"
 
 mkdir -p "$OUTPUT_DIR"
@@ -36,8 +37,14 @@ cd "$ROOT_DIR"
 swift build -c release --arch arm64
 BUILD_BINARY="$(swift build -c release --arch arm64 --show-bin-path)/$APP_NAME"
 
-mkdir -p "$APP_MACOS"
+mkdir -p "$APP_MACOS" "$APP_RESOURCES"
 install -m 0755 "$BUILD_BINARY" "$APP_MACOS/$APP_NAME"
+RESOURCE_BUNDLE="$(dirname "$BUILD_BINARY")/${APP_NAME}_${APP_NAME}.bundle"
+if [[ ! -d "$RESOURCE_BUNDLE" ]]; then
+  echo "missing SwiftPM resource bundle: $RESOURCE_BUNDLE" >&2
+  exit 1
+fi
+cp -R "$RESOURCE_BUNDLE" "$APP_RESOURCES/"
 
 cat >"$APP_CONTENTS/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

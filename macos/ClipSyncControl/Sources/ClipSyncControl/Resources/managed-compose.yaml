@@ -1,0 +1,72 @@
+services:
+  managed-clipboard:
+    image: ${CLIPSYNC_IMAGE:?Choose a ClipSync image before starting.}
+    restart: unless-stopped
+    environment:
+      CLIPSYNC_PASSWORD: ${CLIPSYNC_PASSWORD:?ClipSync password is required.}
+      CLIPSYNC_TTL_DAYS: ${CLIPSYNC_TTL_DAYS:-30}
+      CLIPSYNC_MAX_DISK_MB: ${CLIPSYNC_MAX_DISK_MB:-10240}
+      CLIPSYNC_MAX_TEXT_MB: ${CLIPSYNC_MAX_TEXT_MB:-64}
+      CLIPSYNC_TEXT_INLINE_KB: ${CLIPSYNC_TEXT_INLINE_KB:-64}
+      CLIPSYNC_MAX_IMAGE_MB: ${CLIPSYNC_MAX_IMAGE_MB:-64}
+      CLIPSYNC_MAX_FILE_MB: ${CLIPSYNC_MAX_FILE_MB:-2048}
+      CLIPSYNC_UPLOAD_CHUNK_MB: ${CLIPSYNC_UPLOAD_CHUNK_MB:-32}
+      CLIPSYNC_UPLOAD_TTL_MINUTES: ${CLIPSYNC_UPLOAD_TTL_MINUTES:-15}
+      CLIPSYNC_UPLOAD_CHUNK_IDLE_SECONDS: ${CLIPSYNC_UPLOAD_CHUNK_IDLE_SECONDS:-120}
+      CLIPSYNC_MAX_UPLOADS: ${CLIPSYNC_MAX_UPLOADS:-16}
+      CLIPSYNC_MAX_UPLOADS_PER_CLIENT: ${CLIPSYNC_MAX_UPLOADS_PER_CLIENT:-2}
+      CLIPSYNC_MAX_UPLOADS_PER_ROOM: ${CLIPSYNC_MAX_UPLOADS_PER_ROOM:-4}
+      CLIPSYNC_MAX_ROOMS: ${CLIPSYNC_MAX_ROOMS:-128}
+      CLIPSYNC_MAX_ROOM_NAME_BYTES: ${CLIPSYNC_MAX_ROOM_NAME_BYTES:-64}
+      CLIPSYNC_MAX_ITEMS_PER_ROOM: ${CLIPSYNC_MAX_ITEMS_PER_ROOM:-80}
+      CLIPSYNC_MAX_UNPINNED_ITEMS_PER_ROOM: ${CLIPSYNC_MAX_UNPINNED_ITEMS_PER_ROOM:-60}
+      CLIPSYNC_MAX_PINNED_ITEMS_PER_ROOM: ${CLIPSYNC_MAX_PINNED_ITEMS_PER_ROOM:-20}
+      CLIPSYNC_TRUSTED_PROXY_CIDRS: ${CLIPSYNC_TRUSTED_PROXY_CIDRS:-172.31.0.3/32}
+      CLIPSYNC_MAX_SSE: ${CLIPSYNC_MAX_SSE:-128}
+      CLIPSYNC_MAX_SSE_PER_CLIENT: ${CLIPSYNC_MAX_SSE_PER_CLIENT:-4}
+    ports:
+      - "127.0.0.1:8788:8787"
+    volumes:
+      - clipboard-data:/var/lib/clipsync
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8787/healthz | grep -qx ok"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      managed-net:
+        ipv4_address: 172.31.0.2
+        aliases: [clipboard]
+
+  managed-cloudflared:
+    image: cloudflare/cloudflared:2026.8.2@sha256:0aa26e284f05e6c77ae375b8c9c11d9eb6a448fb7bcd8d40f31cb6176189eb38
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN:-not-configured}
+    restart: unless-stopped
+    profiles: ["tunnel"]
+    depends_on:
+      managed-clipboard:
+        condition: service_healthy
+    networks:
+      managed-net:
+        ipv4_address: 172.31.0.3
+
+volumes:
+  clipboard-data:
+    external: true
+    name: clipsync_clipboard-data
+
+networks:
+  managed-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.31.0.0/29

@@ -25,7 +25,7 @@ struct SettingsView: View {
                         StackSettingsPane(
                             settings: settings,
                             status: status,
-                            chooseProjectFolder: chooseProjectFolder,
+                            chooseLegacyProject: chooseLegacyProject,
                             chooseDockerCLI: chooseDockerCLI
                         )
                     case .connection:
@@ -46,17 +46,6 @@ struct SettingsView: View {
         .frame(minWidth: 780, minHeight: 600)
     }
 
-    private func chooseProjectFolder() {
-        let panel = NSOpenPanel()
-        panel.canChooseFiles = false
-        panel.canChooseDirectories = true
-        panel.allowsMultipleSelection = false
-        panel.directoryURL = URL(fileURLWithPath: settings.projectPath, isDirectory: true)
-        if panel.runModal() == .OK, let url = panel.url {
-            settings.projectPath = url.path
-        }
-    }
-
     private func chooseDockerCLI() {
         let panel = NSOpenPanel()
         panel.canChooseFiles = true
@@ -64,6 +53,16 @@ struct SettingsView: View {
         panel.allowsMultipleSelection = false
         if panel.runModal() == .OK, let url = panel.url {
             settings.dockerPath = url.path
+        }
+    }
+
+    private func chooseLegacyProject() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        if panel.runModal() == .OK, let url = panel.url {
+            settings.legacyProjectPath = url.path
         }
     }
 }
@@ -320,54 +319,114 @@ private struct RoomDataRow: View {
 private struct StackSettingsPane: View {
     @ObservedObject var settings: SettingsStore
     @ObservedObject var status: StatusStore
-    let chooseProjectFolder: () -> Void
+    let chooseLegacyProject: () -> Void
     let chooseDockerCLI: () -> Void
+    @State private var showMigrationConfirmation = false
 
     var body: some View {
-        SettingsPane(title: "ClipSync stack", subtitle: "Configure the local project this utility is allowed to control.") {
-            SettingsGroup(title: "Project folder") {
+        SettingsPane(title: "ClipSync stack", subtitle: "This app manages a private Docker Compose workspace and keeps stored room data in the existing Docker volume.") {
+            SettingsGroup(title: "Managed workspace") {
                 HStack(spacing: 12) {
-                    Image(systemName: "folder.fill")
+                    Image(systemName: "app.badge.checkmark")
                         .foregroundStyle(.blue)
                         .font(.title3)
                         .frame(width: 24)
-                    Text(settings.projectPath)
-                        .font(.body.weight(.medium))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                        .textSelection(.enabled)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("App-managed stack")
+                            .font(.body.weight(.medium))
+                        Text(settings.managedWorkspacePath)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                    }
                     Spacer(minLength: 16)
-                    Button("Choose…", action: chooseProjectFolder)
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
                 }
 
                 Divider()
 
                 HStack(alignment: .top, spacing: 12) {
-                    Image(systemName: settings.approval == nil ? "exclamationmark.circle.fill" : "checkmark.circle.fill")
-                        .foregroundStyle(settings.approval == nil ? .orange : .green)
-                        .font(.body)
+                    Image(systemName: "externaldrive.fill")
+                        .foregroundStyle(.orange)
                         .frame(width: 24)
                     VStack(alignment: .leading, spacing: 3) {
-                        Text(settings.approval == nil ? "Folder needs approval" : "Folder approved")
-                            .font(.body.weight(.medium))
-                        Text(settings.setupMessage)
+                        Text("Existing room-data volume")
+                        .font(.body.weight(.medium))
+                        Text("Migration only stops legacy services and reuses \(ManagedStack.dataVolumeName). It never deletes the volume or the legacy project.")
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     Spacer(minLength: 16)
-                    if settings.approval == nil {
-                        Button("Approve Folder") {
-                            settings.approveCurrentProject()
-                            Task { await status.refresh() }
-                        }
-                        .buttonStyle(.borderedProminent)
+                    if case .available = settings.migrationState {
+                        Button("Migrate…") { showMigrationConfirmation = true }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(status.isBusy)
+                    Spacer(minLength: 16)
                     } else {
-                        Button("Remove Approval", role: .destructive) {
-                            settings.clearApproval()
-                            Task { await status.refresh() }
+                        Text(migrationDescription)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                HStack {
+                    Text(settings.legacyProjectPath.isEmpty ? "Legacy stack is discovered automatically from Docker labels." : settings.legacyProjectPath)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer()
+                    Button("Choose Legacy Folder…", action: chooseLegacyProject)
+                }
+            }
+
+            SettingsGroup(title: "ClipSync version") {
+                HStack {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Selected image")
+                        Text(settings.selectedImage)
+                            .font(.caption.monospaced())
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                    Spacer()
+                    Button(settings.isLoadingReleases ? "Checking…" : "Check for Updates") {
+                        Task { await settings.loadStableReleases() }
+                    }
+                    .disabled(settings.isLoadingReleases || status.isBusy)
+                }
+                if !settings.downloadedImages.isEmpty {
+                    Picker("Downloaded version", selection: Binding(
+                        get: { settings.selectedImage },
+                        set: { settings.selectedImage = $0 }
+                    )) {
+                        ForEach(settings.downloadedImages) { image in
+                            Text("\(image.tag) · \(image.digest.prefix(19))").tag(image.image)
                         }
                     }
+                    Button("Use Downloaded Version") {
+                        if let image = settings.downloadedImages.first(where: { $0.image == settings.selectedImage }) {
+                            settings.useDownloadedImage(image)
+                        }
+                    }
+                    .disabled(!settings.downloadedImages.contains(where: { $0.image == settings.selectedImage }))
+                }
+                if !settings.availableReleases.isEmpty {
+                    Picker("Stable release", selection: $settings.selectedImage) {
+                        ForEach(settings.availableReleases) { release in
+                            Text(release.tagName).tag(release.image)
+                        }
+                    }
+                }
+                HStack {
+                    Text("Choose a previously downloaded release to roll back, or choose a newer stable release and download it explicitly.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("Download Selected") { status.updateSelectedImage() }
+                        .disabled(status.isBusy)
                 }
             }
 
@@ -404,14 +463,54 @@ private struct StackSettingsPane: View {
                 }
             }
         }
+        .confirmationDialog("Migrate existing ClipSync data?", isPresented: $showMigrationConfirmation, titleVisibility: .visible) {
+            Button("Stop Legacy and Migrate", role: .destructive) { status.migrateLegacy() }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("ClipSync Control will import the legacy password into Keychain, stop legacy containers, and start the managed stack using the same room-data volume. No volume, image, or legacy project files will be deleted.")
+        }
+    }
+
+    private var migrationDescription: String {
+        switch settings.migrationState {
+        case .unknown: "Refresh status to check for a compatible legacy stack."
+        case .notNeeded: "No compatible legacy stack is waiting to migrate."
+        case .available: "A compatible legacy stack is ready to migrate."
+        case let .unavailable(message): message
+        }
     }
 }
 
 private struct ConnectionSettingsPane: View {
     @ObservedObject var settings: SettingsStore
+    @State private var tunnelToken = ""
 
     var body: some View {
-        SettingsPane(title: "Connection", subtitle: "An optional public address lets ClipSync Control verify the tunnel separately from local health.") {
+        SettingsPane(title: "Cloudflare Tunnel", subtitle: "Configure the remote tunnel token in macOS Keychain. ClipSync connects through Docker Desktop; this app never stores the token in project files.") {
+            SettingsGroup(title: "Tunnel token") {
+                HStack {
+                    Label(settings.hasTunnelToken ? "Token saved in Keychain" : "No tunnel token configured", systemImage: settings.hasTunnelToken ? "checkmark.circle.fill" : "exclamationmark.circle")
+                        .foregroundStyle(settings.hasTunnelToken ? .green : .orange)
+                    Spacer()
+                    if settings.hasTunnelToken {
+                        Button("Remove", role: .destructive) { settings.removeTunnelConfiguration() }
+                    }
+                }
+                SecureField("Paste remotely managed tunnel token", text: $tunnelToken)
+                    .textFieldStyle(.roundedBorder)
+                HStack {
+                    Button("Save Token") {
+                        do { try settings.setTunnelToken(tunnelToken); tunnelToken = "" } catch { }
+                    }
+                    .disabled(tunnelToken.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    Link("Open Cloudflare dashboard", destination: URL(string: "https://one.dash.cloudflare.com/")!)
+                }
+                Text("Create a remotely managed tunnel in Cloudflare, map its public hostname to http://clipboard:8787, then paste its token here. Cloudflare Access is recommended before exposing ClipSync publicly.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             SettingsGroup(title: "Public endpoint") {
                 HStack(alignment: .firstTextBaseline, spacing: 16) {
                     Text("Public URL")
@@ -419,7 +518,7 @@ private struct ConnectionSettingsPane: View {
                     TextField("Optional HTTPS URL", text: $settings.publicURL)
                         .textFieldStyle(.roundedBorder)
                 }
-                Text("Leave this empty to use local health and the running tunnel process as the status signal.")
+                Text("Use the public HTTPS URL only for health checks. Leave it empty to use the local service and tunnel process as the status signal.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .padding(.leading, 136)

@@ -73,6 +73,13 @@ final class ProjectValidatorTests: XCTestCase {
         XCTAssertEqual(permissions?.uint16Value, 0o600)
     }
 
+    func testPasswordStoreReadsOptionalLegacyTunnelToken() throws {
+        let project = try makeProject(environment: "CLIPSYNC_PASSWORD=old-password\nCLOUDFLARE_TUNNEL_TOKEN=legacy-token\n")
+        let validated = try ProjectValidator.validate(projectPath: project.path)
+
+        XCTAssertEqual(try ClipSyncPasswordStore.currentTunnelToken(in: validated), "legacy-token")
+    }
+
     func testGeneratedPasswordIsURLSafeAndHighEntropyLength() throws {
         let password = try ClipSyncPasswordStore.generatePassword()
 
@@ -81,7 +88,7 @@ final class ProjectValidatorTests: XCTestCase {
     }
 
     func testPasswordRotationComposeArgumentsPreservePersistentData() throws {
-        let arguments = DockerClient.applyPasswordChangeArguments()
+        let arguments = DockerClient.applyPasswordChangeArguments(includeTunnel: true)
 
         XCTAssertTrue(arguments.contains("--force-recreate"))
         XCTAssertFalse(arguments.contains("down"))
@@ -90,9 +97,9 @@ final class ProjectValidatorTests: XCTestCase {
     }
 
     func testStartStackUsesTunnelProfileWithoutRemovingData() {
-        let arguments = DockerClient.startStackArguments()
+        let arguments = DockerClient.startStackArguments(includeTunnel: true)
 
-        XCTAssertEqual(arguments, ["--profile", "tunnel", "up", "-d", "--no-build"])
+        XCTAssertEqual(arguments, ["--profile", "tunnel", "up", "-d", "--no-build", "--pull", "never"])
         XCTAssertFalse(arguments.contains("down"))
         XCTAssertFalse(arguments.contains("-v"))
     }
@@ -100,11 +107,11 @@ final class ProjectValidatorTests: XCTestCase {
     func testTunnelLifecycleArgumentsTargetOnlyCloudflared() {
         XCTAssertEqual(
             DockerClient.startTunnelArguments(),
-            ["--profile", "tunnel", "up", "-d", "--no-build", "cloudflared"]
+            ["--profile", "tunnel", "up", "-d", "--no-build", ManagedStack.tunnelService]
         )
         XCTAssertEqual(
             DockerClient.restartTunnelArguments(),
-            ["--profile", "tunnel", "restart", "cloudflared"]
+            ["--profile", "tunnel", "restart", ManagedStack.tunnelService]
         )
     }
 
@@ -151,7 +158,7 @@ final class ProjectValidatorTests: XCTestCase {
             "wget", "http://127.0.0.1:8787/admin/rooms",
         ])
 
-        XCTAssertEqual(arguments, ["exec", "-T", "clipboard", "wget", "http://127.0.0.1:8787/admin/rooms"])
+        XCTAssertEqual(arguments, ["exec", "-T", ManagedStack.clipboardService, "wget", "http://127.0.0.1:8787/admin/rooms"])
         XCTAssertFalse(arguments.contains("cloudflared"))
     }
 

@@ -9,7 +9,6 @@ final class SettingsViewTests: XCTestCase {
     func testSettingsViewRendersDefaultPaneAtSupportedSizes() throws {
         let suiteName = "ClipSyncControlSettingsTests.\(UUID().uuidString)"
         let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
-        defaults.set("/nonexistent/clipsync-test-project", forKey: "projectPath")
         defer { defaults.removePersistentDomain(forName: suiteName) }
 
         let settings = SettingsStore(defaults: defaults)
@@ -24,7 +23,7 @@ final class SettingsViewTests: XCTestCase {
 
             for expectedText in [
                 "ClipSync stack",
-                "Project folder",
+                "Managed workspace",
                 "Local Docker",
             ] {
                 XCTAssertTrue(

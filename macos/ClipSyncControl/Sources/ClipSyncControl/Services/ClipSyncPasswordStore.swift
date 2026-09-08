@@ -39,6 +39,19 @@ enum ClipSyncPasswordStore {
         return try normalizedPassword(from: rawValue)
     }
 
+    static func currentTunnelToken(in project: ValidatedProject) throws -> String? {
+        let contents = try environmentContents(in: project)
+        let expression = try NSRegularExpression(
+            pattern: #"(?m)^[ \t]*(?:export[ \t]+)?CLOUDFLARE_TUNNEL_TOKEN[ \t]*=[ \t]*([^\r\n]*)$"#
+        )
+        let range = NSRange(contents.startIndex..., in: contents)
+        guard let match = expression.matches(in: contents, range: range).last else { return nil }
+        let raw = (contents as NSString).substring(with: match.range(at: 1))
+        if raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return nil }
+        let token = try normalizedPassword(from: raw)
+        return KeychainSecretStore.valid(token) ? token : nil
+    }
+
     static func generatePassword() throws -> String {
         var bytes = [UInt8](repeating: 0, count: 32)
         let result = bytes.withUnsafeMutableBytes { buffer in

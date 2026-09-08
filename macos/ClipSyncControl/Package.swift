@@ -8,7 +8,10 @@ let package = Package(
         .executable(name: "ClipSyncControl", targets: ["ClipSyncControl"]),
     ],
     targets: [
-        .executableTarget(name: "ClipSyncControl"),
+        .executableTarget(
+            name: "ClipSyncControl",
+            resources: [.process("Resources")]
+        ),
         .testTarget(name: "ClipSyncControlTests", dependencies: ["ClipSyncControl"]),
     ]
 )
