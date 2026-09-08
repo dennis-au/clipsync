@@ -13,7 +13,15 @@ final class ManagedStackTests: XCTestCase {
         XCTAssertTrue(compose.contains("name: clipsync_clipboard-data"))
         XCTAssertTrue(compose.contains("127.0.0.1:8788:8787"))
         XCTAssertTrue(compose.contains("aliases: [clipboard]"))
+        XCTAssertTrue(compose.contains("managed-net:"))
+        XCTAssertTrue(compose.contains("external: true"))
+        XCTAssertTrue(compose.contains("name: ${CLIPSYNC_MANAGED_NETWORK:?Managed network is required.}"))
         XCTAssertTrue(compose.contains("cloudflare/cloudflared:2026.8.2@sha256:"))
+        XCTAssertTrue(compose.contains("CLIPSYNC_TRUSTED_PROXY_CIDRS: ${CLIPSYNC_TRUSTED_PROXY_CIDRS:?Managed network CIDR is required.}"))
+        XCTAssertFalse(compose.contains("ipam:"))
+        XCTAssertFalse(compose.contains("ipv4_address:"))
+        XCTAssertFalse(compose.contains("172.31."))
+        XCTAssertFalse(compose.contains("driver: bridge"))
         XCTAssertFalse(compose.contains("container_name:"))
         XCTAssertFalse(compose.contains("build:"))
     }
@@ -23,13 +31,21 @@ final class ManagedStackTests: XCTestCase {
         let secret = "very-secret-value"
         let file = try ManagedEnvironmentFile.create(
             in: stack,
-            values: ManagedEnvironmentValues(image: "ghcr.io/dennis-au/clipsync:v0.3.0", password: secret, tunnelToken: "token-value")
+            values: ManagedEnvironmentValues(
+                image: "ghcr.io/dennis-au/clipsync:v0.3.0",
+                password: secret,
+                tunnelToken: "token-value",
+                trustedProxyCIDRs: "192.168.80.0/20"
+            )
         )
         defer { ManagedEnvironmentFile.destroy(file) }
 
         let permissions = try XCTUnwrap(FileManager.default.attributesOfItem(atPath: file.path)[.posixPermissions] as? NSNumber)
         XCTAssertEqual(permissions.uint16Value, 0o600)
-        XCTAssertTrue(try String(contentsOf: file, encoding: .utf8).contains("CLIPSYNC_PASSWORD=\(secret)"))
+        let contents = try String(contentsOf: file, encoding: .utf8)
+        XCTAssertTrue(contents.contains("CLIPSYNC_PASSWORD=\(secret)"))
+        XCTAssertTrue(contents.contains("CLIPSYNC_MANAGED_NETWORK=\(ManagedStack.managedNetworkName)"))
+        XCTAssertTrue(contents.contains("CLIPSYNC_TRUSTED_PROXY_CIDRS=192.168.80.0/20"))
         XCTAssertEqual(ManagedEnvironmentFile.redactedDescription(["docker", secret], secrets: [secret]), "docker [REDACTED]")
 
         ManagedEnvironmentFile.destroy(file)
@@ -122,6 +138,49 @@ final class ManagedStackTests: XCTestCase {
             DockerClient.migrationImagePreparationArguments(includeTunnel: true),
             ["pull", "--quiet", ManagedStack.clipboardService, ManagedStack.tunnelService]
         )
+    }
+
+    func testManagedNetworkCreateUsesAutomaticIPAMAndOwnershipLabel() {
+        let arguments = DockerClient.managedNetworkCreateArguments()
+
+        XCTAssertEqual(arguments, [
+            "network", "create",
+            "--driver", "bridge",
+            "--label", "\(ManagedStack.managedNetworkOwnershipLabel)=\(ManagedStack.managedNetworkOwnershipValue)",
+            ManagedStack.managedNetworkName,
+        ])
+        XCTAssertFalse(arguments.contains("--subnet"))
+        XCTAssertFalse(arguments.contains("rm"))
+        XCTAssertFalse(arguments.contains("prune"))
+        XCTAssertFalse(arguments.contains("down"))
+        XCTAssertEqual(
+            DockerClient.managedNetworkInspectArguments(),
+            ["network", "inspect", ManagedStack.managedNetworkName, "--format", "{{json .}}"]
+        )
+    }
+
+    func testManagedNetworkInspectionReturnsOnlyOwnedBridgeCIDR() throws {
+        let inspection = #"""
+        {"Name":"clipsync-control-managed","Driver":"bridge","Labels":{"io.clipsync.control.managed":"true"},"IPAM":{"Config":[{"Subnet":"192.168.80.0/20"}]}}
+        """#
+
+        XCTAssertEqual(try DockerClient.managedNetworkCIDR(from: inspection), "192.168.80.0/20")
+    }
+
+    func testManagedNetworkInspectionRejectsForeignOrInvalidNetworks() {
+        let examples = [
+            #"{"Name":"clipsync-control-managed","Driver":"bridge","Labels":{},"IPAM":{"Config":[{"Subnet":"192.168.80.0/20"}]}}"#,
+            #"{"Name":"clipsync-control-managed","Driver":"overlay","Labels":{"io.clipsync.control.managed":"true"},"IPAM":{"Config":[{"Subnet":"192.168.80.0/20"}]}}"#,
+            #"{"Name":"clipsync-control-managed","Driver":"bridge","Labels":{"io.clipsync.control.managed":"true"},"IPAM":{"Config":[{"Subnet":"not-a-cidr"}]}}"#,
+            #"{"Name":"clipsync-control-managed","Driver":"bridge","Labels":{"io.clipsync.control.managed":"true"},"IPAM":{"Config":[{"Subnet":"10.0.0.0/8"}]}}"#,
+            #"{"Name":"another-network","Driver":"bridge","Labels":{"io.clipsync.control.managed":"true"},"IPAM":{"Config":[{"Subnet":"192.168.80.0/20"}]}}"#,
+        ]
+
+        for inspection in examples {
+            XCTAssertThrowsError(try DockerClient.managedNetworkCIDR(from: inspection)) { error in
+                XCTAssertEqual(error as? DockerClientError, .invalidManagedNetwork)
+            }
+        }
     }
 
     private func preparedStack() throws -> ManagedStack {

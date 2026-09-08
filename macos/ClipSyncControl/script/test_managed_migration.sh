@@ -10,9 +10,11 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 MANAGED_SOURCE="$ROOT_DIR/Sources/ClipSyncControl/Resources/managed-compose.yaml"
-IMAGE="${CLIPSYNC_TEST_IMAGE:-ghcr.io/dennis-au/clipsync:v0.3.0}"
+IMAGE="${CLIPSYNC_TEST_IMAGE:-ghcr.io/dennis-au/clipsync:v0.3.1}"
 ID="clipsync-integration-$(uuidgen | tr '[:upper:]' '[:lower:]')"
 VOLUME="${ID}-data"
+MANAGED_PROJECT="${ID}-managed"
+MANAGED_NETWORK="${ID}-managed-net"
 LEGACY_PORT="$((20000 + RANDOM % 10000))"
 MANAGED_PORT="$((30001 + RANDOM % 10000))"
 WORKSPACE="$(mktemp -d)"
@@ -23,8 +25,9 @@ PASSWORD="integration-password"
 COOKIE="$(printf %s "$PASSWORD" | shasum -a 256 | awk '{print $1}')"
 
 cleanup() {
-  docker compose --project-name "$ID-managed" --project-directory "$WORKSPACE" --env-file "$ENV_FILE" -f "$MANAGED_FILE" stop >/dev/null 2>&1 || true
+  docker compose --project-name "$MANAGED_PROJECT" --project-directory "$WORKSPACE" --env-file "$ENV_FILE" -f "$MANAGED_FILE" stop >/dev/null 2>&1 || true
   docker compose --project-name "$ID-legacy" --project-directory "$WORKSPACE" --env-file "$ENV_FILE" -f "$LEGACY_FILE" stop >/dev/null 2>&1 || true
+  docker network rm "$MANAGED_NETWORK" >/dev/null 2>&1 || true
   rm -rf "$WORKSPACE"
 }
 trap cleanup EXIT
@@ -41,6 +44,12 @@ wait_for_health() {
 docker info >/dev/null
 docker pull "$IMAGE" >/dev/null
 docker volume create "$VOLUME" >/dev/null
+docker network create \
+  --driver bridge \
+  --label "io.clipsync.control.managed=true" \
+  "$MANAGED_NETWORK" >/dev/null
+TRUSTED_PROXY_CIDRS="$(docker network inspect "$MANAGED_NETWORK" --format '{{range .IPAM.Config}}{{.Subnet}}{{end}}')"
+test -n "$TRUSTED_PROXY_CIDRS"
 # ClipSync runs as UID/GID 10001. Seed the external volume with the same ownership
 # and permissions it receives from the production image, rather than leaving a
 # root-owned sentinel that prevents the legacy service from writing room data.
@@ -59,25 +68,28 @@ services:
       interval: 2s
       timeout: 2s
       retries: 10
+    networks: [legacy-net]
 volumes:
   clipboard-data:
     external: true
     name: $VOLUME
+networks:
+  legacy-net:
+    external: true
+    name: $MANAGED_NETWORK
 EOF
-# The production Compose resource reserves an address range for cloudflared.
-# This local-only migration test has no tunnel and lets Docker allocate a unique
-# network instead, so it cannot overlap an already-running ClipSync stack.
+# Use the shipped Compose resource without modifying its network definition.
+# The UUID-scoped external bridge is created with Docker-assigned IPAM above.
 sed \
   -e "s/name: clipsync_clipboard-data/name: $VOLUME/" \
   -e "s/127.0.0.1:8788:8787/127.0.0.1:$MANAGED_PORT:8787/" \
-  -e '/^        ipv4_address: 172.31.0.[23]$/d' \
-  -e '/^    ipam:$/,/^        - subnet:/d' \
   "$MANAGED_SOURCE" >"$MANAGED_FILE"
-printf 'CLIPSYNC_IMAGE=%s\nCLIPSYNC_PASSWORD=%s\n' "$IMAGE" "$PASSWORD" >"$ENV_FILE"
+printf 'CLIPSYNC_IMAGE=%s\nCLIPSYNC_PASSWORD=%s\nCLIPSYNC_MANAGED_NETWORK=%s\nCLIPSYNC_TRUSTED_PROXY_CIDRS=%s\n' \
+  "$IMAGE" "$PASSWORD" "$MANAGED_NETWORK" "$TRUSTED_PROXY_CIDRS" >"$ENV_FILE"
 chmod 600 "$LEGACY_FILE" "$MANAGED_FILE" "$ENV_FILE"
 
 docker compose --project-name "$ID-legacy" --project-directory "$WORKSPACE" --env-file "$ENV_FILE" -f "$LEGACY_FILE" config --quiet
-docker compose --project-name "$ID-managed" --project-directory "$WORKSPACE" --env-file "$ENV_FILE" -f "$MANAGED_FILE" config --quiet
+docker compose --project-name "$MANAGED_PROJECT" --project-directory "$WORKSPACE" --env-file "$ENV_FILE" -f "$MANAGED_FILE" config --quiet
 docker compose --project-name "$ID-legacy" --project-directory "$WORKSPACE" --env-file "$ENV_FILE" -f "$LEGACY_FILE" up -d --no-build --pull never
 wait_for_health "$LEGACY_PORT"
 curl --fail --silent -X POST -H 'X-Kind: text' -H "Cookie: clip_auth=$COOKIE" --data 'migration room item' "http://127.0.0.1:$LEGACY_PORT/push?room=migration-room" >/dev/null
@@ -86,8 +98,11 @@ curl --fail --silent -H "Cookie: clip_auth=$COOKIE" "http://127.0.0.1:$LEGACY_PO
 # This is the same non-destructive legacy transition used by the controller.
 docker compose --project-name "$ID-legacy" --project-directory "$WORKSPACE" --env-file "$ENV_FILE" -f "$LEGACY_FILE" stop
 ! docker compose --project-name "$ID-legacy" --project-directory "$WORKSPACE" --env-file "$ENV_FILE" -f "$LEGACY_FILE" ps --status running --services | grep -q legacy-clipboard
-docker compose --project-name "$ID-managed" --project-directory "$WORKSPACE" --env-file "$ENV_FILE" -f "$MANAGED_FILE" up -d --no-build --pull never managed-clipboard
+docker compose --project-name "$MANAGED_PROJECT" --project-directory "$WORKSPACE" --env-file "$ENV_FILE" -f "$MANAGED_FILE" up -d --no-build --pull never managed-clipboard
 wait_for_health "$MANAGED_PORT"
+MANAGED_CONTAINER="$(docker compose --project-name "$MANAGED_PROJECT" --project-directory "$WORKSPACE" --env-file "$ENV_FILE" -f "$MANAGED_FILE" ps -q managed-clipboard)"
+test -n "$MANAGED_CONTAINER"
+docker inspect "$MANAGED_CONTAINER" --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -Fx "CLIPSYNC_TRUSTED_PROXY_CIDRS=$TRUSTED_PROXY_CIDRS" >/dev/null
 curl --fail --silent -H "Cookie: clip_auth=$COOKIE" "http://127.0.0.1:$MANAGED_PORT/list?room=migration-room" | grep -q 'migration room item'
 docker run --rm -v "$VOLUME:/data" busybox sh -c 'test "$(cat /data/migration-sentinel)" = migration-sentinel'
 

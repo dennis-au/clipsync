@@ -2,7 +2,7 @@ import Darwin
 import Foundation
 
 enum DockerClientError: LocalizedError {
-    case executableNotFound, invalidExecutable, daemonUnavailable, remoteContext, composeUnavailable, invalidConfiguration, imageUnavailable
+    case executableNotFound, invalidExecutable, daemonUnavailable, remoteContext, composeUnavailable, invalidConfiguration, invalidManagedNetwork, imageUnavailable
 
     var errorDescription: String? {
         switch self {
@@ -12,6 +12,7 @@ enum DockerClientError: LocalizedError {
         case .remoteContext: "ClipSync Control only works with a local Docker context."
         case .composeUnavailable: "Docker Compose v2 is not available."
         case .invalidConfiguration: "The managed ClipSync Compose configuration is invalid."
+        case .invalidManagedNetwork: "The ClipSync managed Docker network is missing, not app-owned, or has no valid IPv4 subnet."
         case .imageUnavailable: "The selected ClipSync image could not be downloaded."
         }
     }
@@ -33,6 +34,32 @@ struct DownloadedClipSyncImage: Codable, Equatable, Identifiable {
     var tag: String { ClipSyncRelease.tag(fromImage: image) ?? image }
 }
 
+private struct DockerNetworkInspection: Decodable {
+    struct IPAM: Decodable {
+        struct Configuration: Decodable {
+            let subnet: String?
+
+            enum CodingKeys: String, CodingKey { case subnet = "Subnet" }
+        }
+
+        let configuration: [Configuration]?
+
+        enum CodingKeys: String, CodingKey { case configuration = "Config" }
+    }
+
+    let name: String?
+    let driver: String?
+    let labels: [String: String]?
+    let ipam: IPAM?
+
+    enum CodingKeys: String, CodingKey {
+        case name = "Name"
+        case driver = "Driver"
+        case labels = "Labels"
+        case ipam = "IPAM"
+    }
+}
+
 struct DockerClient {
     private let stack: ManagedStack
     private let executable: URL
@@ -50,6 +77,7 @@ struct DockerClient {
         let composeVersion = try await run(["compose", "version", "--short"])
         guard composeVersion.exitCode == 0 else { throw DockerClientError.composeUnavailable }
         _ = try await localContext()
+        _ = try await managedNetworkCIDR()
         let config = try await compose(["config", "--quiet"])
         guard config.exitCode == 0 else { throw DockerClientError.invalidConfiguration }
     }
@@ -191,6 +219,31 @@ struct DockerClient {
         includeTunnel ? ["--profile", "tunnel", "up", "-d", "--no-build", "--pull", "never", "--force-recreate"] : ["up", "-d", "--no-build", "--pull", "never", "--force-recreate", ManagedStack.clipboardService]
     }
 
+    static func managedNetworkCreateArguments(name: String = ManagedStack.managedNetworkName) -> [String] {
+        [
+            "network", "create",
+            "--driver", "bridge",
+            "--label", "\(ManagedStack.managedNetworkOwnershipLabel)=\(ManagedStack.managedNetworkOwnershipValue)",
+            name,
+        ]
+    }
+
+    static func managedNetworkInspectArguments(name: String = ManagedStack.managedNetworkName) -> [String] {
+        ["network", "inspect", name, "--format", "{{json .}}"]
+    }
+
+    static func managedNetworkCIDR(from inspection: String, expectedName: String = ManagedStack.managedNetworkName) throws -> String {
+        guard let data = inspection.trimmingCharacters(in: .whitespacesAndNewlines).data(using: .utf8),
+              let network = try? JSONDecoder().decode(DockerNetworkInspection.self, from: data),
+              network.name == expectedName,
+              network.driver == "bridge",
+              network.labels?[ManagedStack.managedNetworkOwnershipLabel] == ManagedStack.managedNetworkOwnershipValue,
+              let cidr = network.ipam?.configuration?.compactMap(\.subnet).first(where: isValidIPv4CIDR) else {
+            throw DockerClientError.invalidManagedNetwork
+        }
+        return cidr
+    }
+
     static func composeArguments(stack: ManagedStack, environmentFile: URL, context: String, action: [String]) -> [String] {
         ["--context", context, "compose", "--project-name", ManagedStack.projectName, "--project-directory", stack.workspace.path, "--env-file", environmentFile.path, "-f", stack.composeFile.path] + action
     }
@@ -201,9 +254,32 @@ struct DockerClient {
 
     private func compose(_ action: [String], timeout: TimeInterval = 30) async throws -> CommandResult {
         let context = try await localContext()
-        let environmentFile = try ManagedEnvironmentFile.create(in: stack, values: environmentValues)
+        let cidr = try await managedNetworkCIDR(context: context)
+        let environmentFile = try ManagedEnvironmentFile.create(in: stack, values: environmentValues.withTrustedProxyCIDRs(cidr))
         defer { ManagedEnvironmentFile.destroy(environmentFile) }
         return try await run(Self.composeArguments(stack: stack, environmentFile: environmentFile, context: context, action: action), currentDirectory: stack.workspace, timeout: timeout)
+    }
+
+    private func managedNetworkCIDR() async throws -> String {
+        try await managedNetworkCIDR(context: try await localContext())
+    }
+
+    private func managedNetworkCIDR(context: String) async throws -> String {
+        let inspection = try await run(["--context", context] + Self.managedNetworkInspectArguments(name: environmentValues.managedNetworkName))
+        if inspection.exitCode == 0 {
+            return try Self.managedNetworkCIDR(from: inspection.standardOutput, expectedName: environmentValues.managedNetworkName)
+        }
+
+        let creation = try await run(["--context", context] + Self.managedNetworkCreateArguments(name: environmentValues.managedNetworkName))
+        guard creation.exitCode == 0 else {
+            let retry = try await run(["--context", context] + Self.managedNetworkInspectArguments(name: environmentValues.managedNetworkName))
+            guard retry.exitCode == 0 else { throw DockerClientError.invalidManagedNetwork }
+            return try Self.managedNetworkCIDR(from: retry.standardOutput, expectedName: environmentValues.managedNetworkName)
+        }
+
+        let created = try await run(["--context", context] + Self.managedNetworkInspectArguments(name: environmentValues.managedNetworkName))
+        guard created.exitCode == 0 else { throw DockerClientError.invalidManagedNetwork }
+        return try Self.managedNetworkCIDR(from: created.standardOutput, expectedName: environmentValues.managedNetworkName)
     }
 
     private func localContext() async throws -> String {
@@ -222,6 +298,18 @@ struct DockerClient {
 
     private static var safeEnvironment: [String: String] {
         ["HOME": NSHomeDirectory(), "USER": NSUserName(), "PATH": "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin", "LANG": "en_US_POSIX", "LC_ALL": "en_US_POSIX"]
+    }
+
+    private static func isValidIPv4CIDR(_ cidr: String) -> Bool {
+        let pieces = cidr.split(separator: "/", omittingEmptySubsequences: false)
+        guard pieces.count == 2,
+              let prefix = Int(pieces[1]),
+              (16...30).contains(prefix) else { return false }
+        let octets = pieces[0].split(separator: ".", omittingEmptySubsequences: false)
+        return octets.count == 4 && octets.allSatisfy { octet in
+            guard !octet.isEmpty, let value = Int(octet), (0...255).contains(value) else { return false }
+            return String(value) == octet
+        }
     }
 
     private static func resolveExecutable(preferredPath: String) throws -> URL {

@@ -21,7 +21,7 @@ services:
       CLIPSYNC_MAX_ITEMS_PER_ROOM: ${CLIPSYNC_MAX_ITEMS_PER_ROOM:-80}
       CLIPSYNC_MAX_UNPINNED_ITEMS_PER_ROOM: ${CLIPSYNC_MAX_UNPINNED_ITEMS_PER_ROOM:-60}
       CLIPSYNC_MAX_PINNED_ITEMS_PER_ROOM: ${CLIPSYNC_MAX_PINNED_ITEMS_PER_ROOM:-20}
-      CLIPSYNC_TRUSTED_PROXY_CIDRS: ${CLIPSYNC_TRUSTED_PROXY_CIDRS:-172.31.0.3/32}
+      CLIPSYNC_TRUSTED_PROXY_CIDRS: ${CLIPSYNC_TRUSTED_PROXY_CIDRS:?Managed network CIDR is required.}
       CLIPSYNC_MAX_SSE: ${CLIPSYNC_MAX_SSE:-128}
       CLIPSYNC_MAX_SSE_PER_CLIENT: ${CLIPSYNC_MAX_SSE_PER_CLIENT:-4}
     ports:
@@ -44,7 +44,6 @@ services:
       start_period: 10s
     networks:
       managed-net:
-        ipv4_address: 172.31.0.2
         aliases: [clipboard]
 
   managed-cloudflared:
@@ -56,8 +55,7 @@ services:
       managed-clipboard:
         condition: service_healthy
     networks:
-      managed-net:
-        ipv4_address: 172.31.0.3
+      - managed-net
 
 volumes:
   clipboard-data:
@@ -66,7 +64,5 @@ volumes:
 
 networks:
   managed-net:
-    driver: bridge
-    ipam:
-      config:
-        - subnet: 172.31.0.0/29
+    external: true
+    name: ${CLIPSYNC_MANAGED_NETWORK:?Managed network is required.}
