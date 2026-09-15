@@ -61,6 +61,8 @@ private struct DockerNetworkInspection: Decodable {
 }
 
 struct DockerClient {
+    static let gracefulStopTimeout: TimeInterval = 45
+
     private let stack: ManagedStack
     private let executable: URL
     private let environmentValues: ManagedEnvironmentValues
@@ -93,7 +95,8 @@ struct DockerClient {
         try await ensureDataVolume()
         return try await compose(Self.startStackArguments(includeTunnel: includeTunnel))
     }
-    func stop() async throws -> CommandResult { try await compose(Self.stopStackArguments()) }
+    func stop() async throws -> CommandResult { try await compose(Self.stopStackArguments(), timeout: Self.gracefulStopTimeout) }
+    func forceStop() async throws -> CommandResult { try await compose(Self.forceStopStackArguments()) }
     func startTunnel() async throws -> CommandResult {
         try await ensureSelectedImageAvailable()
         try await ensureDataVolume()
@@ -224,7 +227,12 @@ struct DockerClient {
         if includeTunnel { arguments.append(ManagedStack.tunnelService) }
         return arguments
     }
-    static func stopStackArguments() -> [String] { ["stop", "--timeout", "30"] }
+    static func stopStackArguments() -> [String] {
+        ["--profile", "tunnel", "stop", "--timeout", "30"] + ManagedStack.managedServiceNames
+    }
+    static func forceStopStackArguments() -> [String] {
+        ["--profile", "tunnel", "kill", "--signal", "SIGKILL"] + ManagedStack.managedServiceNames
+    }
     static func startTunnelArguments() -> [String] { ["--profile", "tunnel", "up", "-d", "--no-build", ManagedStack.tunnelService] }
     static func restartTunnelArguments() -> [String] { ["--profile", "tunnel", "restart", ManagedStack.tunnelService] }
     static func applyPasswordChangeArguments(includeTunnel: Bool) -> [String] {

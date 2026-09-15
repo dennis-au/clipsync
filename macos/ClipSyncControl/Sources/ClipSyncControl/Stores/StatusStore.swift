@@ -126,7 +126,16 @@ final class StatusStore: ObservableObject {
         case .stop:
             snapshot = .stopping
             detail = "Stopping managed containers. Stored room data is preserved."
-            guard try await client.stop().exitCode == 0 else { throw DockerClientError.invalidConfiguration }
+            do {
+                let result = try await client.stop()
+                if result.exitCode != 0 {
+                    detail = "Normal shutdown did not complete. Force-stopping managed containers."
+                    guard try await client.forceStop().exitCode == 0 else { throw DockerClientError.invalidConfiguration }
+                }
+            } catch ProcessRunnerError.timedOut {
+                detail = "Normal shutdown timed out. Force-stopping managed containers."
+                guard try await client.forceStop().exitCode == 0 else { throw DockerClientError.invalidConfiguration }
+            }
             await waitForLocalHealth(client: client, expectingHealthy: false)
         case .restart:
             guard try await client.selectedImageAvailable() else { throw DockerClientError.imageUnavailable }

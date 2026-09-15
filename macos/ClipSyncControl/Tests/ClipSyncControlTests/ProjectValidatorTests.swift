@@ -38,13 +38,13 @@ final class ProjectValidatorTests: XCTestCase {
     }
 
     func testStopArgumentsCannotDeletePersistentData() throws {
-        let arguments = DockerClient.stopStackArguments()
-
-        XCTAssertTrue(arguments.contains("stop"))
-        XCTAssertFalse(arguments.contains("down"))
-        XCTAssertFalse(arguments.contains("-v"))
-        XCTAssertFalse(arguments.contains("prune"))
-        XCTAssertFalse(arguments.contains("rm"))
+        for arguments in [DockerClient.stopStackArguments(), DockerClient.forceStopStackArguments()] {
+            XCTAssertTrue(arguments.contains("stop") || arguments.contains("kill"))
+            XCTAssertFalse(arguments.contains("down"))
+            XCTAssertFalse(arguments.contains("-v"))
+            XCTAssertFalse(arguments.contains("prune"))
+            XCTAssertFalse(arguments.contains("rm"))
+        }
     }
 
     func testFingerprintChangesWhenComposeChanges() throws {

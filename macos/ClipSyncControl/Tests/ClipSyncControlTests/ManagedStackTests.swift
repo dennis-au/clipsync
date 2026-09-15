@@ -63,6 +63,7 @@ final class ManagedStackTests: XCTestCase {
         let actions = [
             DockerClient.startStackArguments(includeTunnel: false),
             DockerClient.stopStackArguments(),
+            DockerClient.forceStopStackArguments(),
             DockerClient.applyPasswordChangeArguments(includeTunnel: true),
             DockerClient.composeArguments(stack: stack, environmentFile: environment, context: "desktop-linux", action: ["config", "--quiet"]),
         ]
@@ -71,8 +72,20 @@ final class ManagedStackTests: XCTestCase {
             XCTAssertFalse(arguments.contains("-v"))
             XCTAssertFalse(arguments.contains("rm"))
             XCTAssertFalse(arguments.contains("prune"))
-            XCTAssertTrue(arguments.joined(separator: " ").contains("--project-name clipsync") || arguments == DockerClient.stopStackArguments() || arguments == DockerClient.startStackArguments(includeTunnel: false) || arguments == DockerClient.applyPasswordChangeArguments(includeTunnel: true))
+            XCTAssertTrue(arguments.joined(separator: " ").contains("--project-name clipsync") || arguments == DockerClient.stopStackArguments() || arguments == DockerClient.forceStopStackArguments() || arguments == DockerClient.startStackArguments(includeTunnel: false) || arguments == DockerClient.applyPasswordChangeArguments(includeTunnel: true))
         }
+    }
+
+    func testStopCommandsTargetOnlyManagedServices() {
+        XCTAssertGreaterThan(DockerClient.gracefulStopTimeout, 30)
+        XCTAssertEqual(
+            DockerClient.stopStackArguments(),
+            ["--profile", "tunnel", "stop", "--timeout", "30", "managed-clipboard", "managed-cloudflared"]
+        )
+        XCTAssertEqual(
+            DockerClient.forceStopStackArguments(),
+            ["--profile", "tunnel", "kill", "--signal", "SIGKILL", "managed-clipboard", "managed-cloudflared"]
+        )
     }
 
     func testStableCatalogFilteringAndImageSelection() throws {

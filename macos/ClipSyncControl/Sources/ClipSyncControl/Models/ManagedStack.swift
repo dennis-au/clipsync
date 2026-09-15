@@ -8,6 +8,7 @@ struct ManagedStack: Equatable {
     static let managedNetworkOwnershipValue = "true"
     static let clipboardService = "managed-clipboard"
     static let tunnelService = "managed-cloudflared"
+    static let managedServiceNames = [clipboardService, tunnelService]
     static let tunnelImage = "cloudflare/cloudflared:2026.8.2@sha256:0aa26e284f05e6c77ae375b8c9c11d9eb6a448fb7bcd8d40f31cb6176189eb38"
 
     let workspace: URL

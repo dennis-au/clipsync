@@ -125,7 +125,7 @@ struct MenuContentView: View {
     private var stopConfirmation: some View {
         VStack(alignment: .leading, spacing: 2) {
             sectionTitle("Stop ClipSync?")
-            Text("Active connections and uploads will be interrupted. Stored room data will be preserved.")
+            Text("Active connections and uploads will be interrupted. If normal shutdown fails, only the managed containers are force-stopped. Stored room data will be preserved.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
