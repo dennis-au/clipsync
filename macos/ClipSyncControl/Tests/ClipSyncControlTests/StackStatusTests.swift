@@ -8,6 +8,13 @@ final class StackStatusTests: XCTestCase {
         XCTAssertFalse(StackStatus.imagesMissing.canStop)
     }
 
+    func testMigrationRequiredExplainsHowToAvoidConcurrentStacks() {
+        XCTAssertEqual(
+            MigrationError.migrationRequired.errorDescription,
+            "A legacy ClipSync stack is still running. Open Settings and use Migrate before starting the managed stack."
+        )
+    }
+
     func testHealthyClipboardWithStoppedTunnelOffersTunnelStart() {
         let status = StackStatus.classify(
             services: .init(clipboardRunning: true, tunnelRunning: false, localHealthy: true),

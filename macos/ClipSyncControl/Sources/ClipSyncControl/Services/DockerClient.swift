@@ -223,6 +223,16 @@ struct DockerClient {
         )
     }
 
+    func legacyServiceStates(project: ValidatedProject) async throws -> [ComposeService] {
+        let context = try await localContext()
+        let result = try await run(
+            Self.legacyComposeArguments(project: project, context: context, action: ["ps", "--all", "--format", "json"]),
+            currentDirectory: project.directory
+        )
+        guard result.exitCode == 0 else { throw DockerClientError.daemonUnavailable }
+        return Self.decodeServices(result.standardOutput)
+    }
+
     func startLegacy(project: ValidatedProject) async throws -> CommandResult {
         let context = try await localContext()
         return try await run(

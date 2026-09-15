@@ -100,6 +100,10 @@ final class StatusStore: ObservableObject {
                 let requireTunnel = operation == .startTunnel || operation == .restartTunnel
                 let client = try managedClient(requireTunnel: requireTunnel)
                 try await client.validateReady()
+                if operation.requiresExclusiveManagedStack {
+                    await settings.detectMigration(using: client)
+                    try ensureNoPendingMigration()
+                }
                 try await execute(operation, client: client)
             }
         } catch DockerClientError.daemonUnavailable, DockerClientError.executableNotFound {
@@ -244,6 +248,11 @@ final class StatusStore: ObservableObject {
             : "Download the selected ClipSync version in Settings before starting the managed stack."
     }
 
+    private func ensureNoPendingMigration() throws {
+        guard case .available = settings.migrationState else { return }
+        throw MigrationError.migrationRequired
+    }
+
     private func waitForLocalHealth(client: DockerClient, expectingHealthy: Bool) async {
         for _ in 0..<60 {
             if await HealthProbe.localHealthy() == expectingHealthy {
@@ -321,14 +330,26 @@ final class StatusStore: ObservableObject {
 
     private func safeMessage(for error: Error) -> String { (error as? LocalizedError)?.errorDescription ?? "ClipSync Control could not complete that action." }
 
-    private enum Operation: Equatable { case start, stop, restart, rotatePassword, prepareImages, startTunnel, restartTunnel, updateImage, migrateLegacy }
+    private enum Operation: Equatable {
+        case start, stop, restart, rotatePassword, prepareImages, startTunnel, restartTunnel, updateImage, migrateLegacy
+
+        var requiresExclusiveManagedStack: Bool {
+            switch self {
+            case .start, .restart, .rotatePassword, .startTunnel, .restartTunnel:
+                true
+            case .stop, .prepareImages, .updateImage, .migrateLegacy:
+                false
+            }
+        }
+    }
 }
 
 enum MigrationError: LocalizedError {
-    case notAvailable, imagePreparationFailed, legacyStopFailed, managedHealthFailed, managedStartRolledBack, legacyRollbackFailed, rollbackFailed(String)
+    case notAvailable, migrationRequired, imagePreparationFailed, legacyStopFailed, managedHealthFailed, managedStartRolledBack, legacyRollbackFailed, rollbackFailed(String)
     var errorDescription: String? {
         switch self {
         case .notAvailable: "No compatible legacy ClipSync stack is available to migrate."
+        case .migrationRequired: "A legacy ClipSync stack is still running. Open Settings and use Migrate before starting the managed stack."
         case .imagePreparationFailed: "The selected ClipSync image could not be prepared. Legacy ClipSync is still running."
         case .legacyStopFailed: "The legacy ClipSync services could not be stopped. No managed containers were started."
         case .managedHealthFailed: "Managed ClipSync did not become healthy after migration."

@@ -101,6 +101,20 @@ final class ManagedStackTests: XCTestCase {
         XCTAssertEqual(DockerClient.legacyProjectPaths(from: output), ["/Users/other/project/clipsync"])
     }
 
+    func testMigrationOnlyBlocksWhileLegacyServicesAreRunning() {
+        XCTAssertTrue(LegacyMigration.hasRunningLegacyServices([
+            .init(service: "clipboard", state: "running", health: "healthy"),
+            .init(service: "managed-clipboard", state: "running", health: "healthy"),
+        ]))
+        XCTAssertTrue(LegacyMigration.hasRunningLegacyServices([
+            .init(service: "cloudflared", state: "running", health: nil),
+        ]))
+        XCTAssertFalse(LegacyMigration.hasRunningLegacyServices([
+            .init(service: "clipboard", state: "exited", health: nil),
+            .init(service: "managed-clipboard", state: "running", health: "healthy"),
+        ]))
+    }
+
     func testDownloadedImageInventoryHasStableDigestAndCanBeSelectedOffline() {
         let image = DownloadedClipSyncImage(image: "ghcr.io/dennis-au/clipsync:v0.3.0", digest: "sha256:abc", downloadedAt: Date())
         XCTAssertEqual(image.tag, "v0.3.0")
