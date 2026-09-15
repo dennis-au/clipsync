@@ -13,7 +13,7 @@ enum DockerClientError: LocalizedError {
         case .composeUnavailable: "Docker Compose v2 is not available."
         case .invalidConfiguration: "The managed ClipSync Compose configuration is invalid."
         case .invalidManagedNetwork: "The ClipSync managed Docker network is missing, not app-owned, or has no valid IPv4 subnet."
-        case .imageUnavailable: "The selected ClipSync image could not be downloaded."
+        case .imageUnavailable: "A required ClipSync or Cloudflare image is not downloaded."
         }
     }
 }
@@ -91,27 +91,36 @@ struct DockerClient {
     }
 
     func start(includeTunnel: Bool) async throws -> CommandResult {
-        try await ensureSelectedImageAvailable()
+        try await ensureRequiredImagesAvailable(includeTunnel: includeTunnel)
         try await ensureDataVolume()
         return try await compose(Self.startStackArguments(includeTunnel: includeTunnel))
     }
     func stop() async throws -> CommandResult { try await compose(Self.stopStackArguments(), timeout: Self.gracefulStopTimeout) }
     func forceStop() async throws -> CommandResult { try await compose(Self.forceStopStackArguments()) }
     func startTunnel() async throws -> CommandResult {
-        try await ensureSelectedImageAvailable()
+        try await ensureRequiredImagesAvailable(includeTunnel: true)
         try await ensureDataVolume()
         return try await compose(Self.startTunnelArguments())
     }
-    func restartTunnel() async throws -> CommandResult { try await compose(Self.restartTunnelArguments()) }
+    func restartTunnel() async throws -> CommandResult {
+        try await ensureRequiredImagesAvailable(includeTunnel: true)
+        return try await compose(Self.restartTunnelArguments())
+    }
     func applyPasswordChange(includeTunnel: Bool) async throws -> CommandResult {
-        try await ensureSelectedImageAvailable()
+        try await ensureRequiredImagesAvailable(includeTunnel: includeTunnel)
         try await ensureDataVolume()
         return try await compose(Self.applyPasswordChangeArguments(includeTunnel: includeTunnel))
     }
 
     func selectedImageAvailable() async throws -> Bool {
-        let result = try await run(["image", "inspect", environmentValues.image])
-        return result.exitCode == 0
+        try await imageAvailable(environmentValues.image)
+    }
+
+    func requiredImagesAvailable(includeTunnel: Bool) async throws -> Bool {
+        for image in Self.requiredImageReferences(clipboardImage: environmentValues.image, includeTunnel: includeTunnel) {
+            guard try await imageAvailable(image) else { return false }
+        }
+        return true
     }
 
     func pullSelectedImage() async throws -> CommandResult {
@@ -153,8 +162,13 @@ struct DockerClient {
         guard result.exitCode == 0 else { throw DockerClientError.invalidConfiguration }
     }
 
-    private func ensureSelectedImageAvailable() async throws {
-        guard try await selectedImageAvailable() else { throw DockerClientError.imageUnavailable }
+    private func ensureRequiredImagesAvailable(includeTunnel: Bool) async throws {
+        guard try await requiredImagesAvailable(includeTunnel: includeTunnel) else { throw DockerClientError.imageUnavailable }
+    }
+
+    private func imageAvailable(_ image: String) async throws -> Bool {
+        let result = try await run(["image", "inspect", image])
+        return result.exitCode == 0
     }
 
     func discoveredLegacyProject() async throws -> ValidatedProject? {
@@ -221,6 +235,9 @@ struct DockerClient {
     static func clipboardExecArguments(_ arguments: [String]) -> [String] { ["exec", "-T", ManagedStack.clipboardService] + arguments }
     static func startStackArguments(includeTunnel: Bool) -> [String] {
         includeTunnel ? ["--profile", "tunnel", "up", "-d", "--no-build", "--pull", "never"] : ["up", "-d", "--no-build", "--pull", "never", ManagedStack.clipboardService]
+    }
+    static func requiredImageReferences(clipboardImage: String, includeTunnel: Bool) -> [String] {
+        includeTunnel ? [clipboardImage, ManagedStack.tunnelImage] : [clipboardImage]
     }
     static func migrationImagePreparationArguments(includeTunnel: Bool) -> [String] {
         var arguments = ["pull", "--quiet", ManagedStack.clipboardService]

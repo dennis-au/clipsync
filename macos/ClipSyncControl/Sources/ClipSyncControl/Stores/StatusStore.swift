@@ -53,9 +53,9 @@ final class StatusStore: ObservableObject {
         do {
             let client = try managedClient()
             try await client.validateReady()
-            if !(try await client.selectedImageAvailable()) {
+            if !(try await client.requiredImagesAvailable(includeTunnel: settings.hasTunnelToken)) {
                 snapshot = .imagesMissing
-                detail = "Download the selected ClipSync version in Settings before starting the managed stack."
+                detail = missingImagesDetail
                 await settings.detectMigration(using: client)
                 lastUpdated = Date()
                 return
@@ -107,7 +107,7 @@ final class StatusStore: ObservableObject {
             detail = "Docker Desktop is not ready."
         } catch DockerClientError.imageUnavailable {
             snapshot = .imagesMissing
-            detail = "Download the selected ClipSync version in Settings before starting the managed stack."
+            detail = missingImagesDetail
         } catch {
             snapshot = .error(safeMessage(for: error))
             detail = safeMessage(for: error)
@@ -138,7 +138,7 @@ final class StatusStore: ObservableObject {
             }
             await waitForLocalHealth(client: client, expectingHealthy: false)
         case .restart:
-            guard try await client.selectedImageAvailable() else { throw DockerClientError.imageUnavailable }
+            guard try await client.requiredImagesAvailable(includeTunnel: settings.hasTunnelToken) else { throw DockerClientError.imageUnavailable }
             snapshot = .stopping
             detail = "Stopping active connections before restart."
             guard try await client.stop().exitCode == 0 else { throw DockerClientError.invalidConfiguration }
@@ -158,7 +158,7 @@ final class StatusStore: ObservableObject {
             guard try await client.restartTunnel().exitCode == 0 else { throw DockerClientError.invalidConfiguration }
             await waitForTunnel(client: client)
         case .rotatePassword:
-            guard try await client.selectedImageAvailable() else { throw DockerClientError.imageUnavailable }
+            guard try await client.requiredImagesAvailable(includeTunnel: settings.hasTunnelToken) else { throw DockerClientError.imageUnavailable }
             _ = try settings.rotatePassword()
             let newClient = try managedClient()
             snapshot = .starting
@@ -236,6 +236,12 @@ final class StatusStore: ObservableObject {
             preferredExecutablePath: settings.dockerPath,
             environmentValues: settings.managedEnvironment(requireTunnel: requireTunnel)
         )
+    }
+
+    private var missingImagesDetail: String {
+        settings.hasTunnelToken
+            ? "Download the required ClipSync and Cloudflare images in Settings before starting the managed stack."
+            : "Download the selected ClipSync version in Settings before starting the managed stack."
     }
 
     private func waitForLocalHealth(client: DockerClient, expectingHealthy: Bool) async {

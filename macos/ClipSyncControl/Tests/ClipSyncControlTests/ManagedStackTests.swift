@@ -107,6 +107,17 @@ final class ManagedStackTests: XCTestCase {
         XCTAssertTrue(DockerClient.startStackArguments(includeTunnel: false).contains("never"))
     }
 
+    func testRequiredImagesIncludePinnedTunnelOnlyWhenTunnelIsEnabled() {
+        XCTAssertEqual(
+            DockerClient.requiredImageReferences(clipboardImage: "ghcr.io/dennis-au/clipsync:v0.3.5", includeTunnel: false),
+            ["ghcr.io/dennis-au/clipsync:v0.3.5"]
+        )
+        XCTAssertEqual(
+            DockerClient.requiredImageReferences(clipboardImage: "ghcr.io/dennis-au/clipsync:v0.3.5", includeTunnel: true),
+            ["ghcr.io/dennis-au/clipsync:v0.3.5", ManagedStack.tunnelImage]
+        )
+    }
+
     func testDefaultImageTracksCurrentStableRelease() {
         XCTAssertEqual(ClipSyncRelease.defaultImage, "ghcr.io/dennis-au/clipsync:v0.3.5")
     }
