@@ -89,18 +89,26 @@ struct DockerClient {
     }
 
     func start(includeTunnel: Bool) async throws -> CommandResult {
+        try await ensureSelectedImageAvailable()
         try await ensureDataVolume()
         return try await compose(Self.startStackArguments(includeTunnel: includeTunnel))
     }
     func stop() async throws -> CommandResult { try await compose(Self.stopStackArguments()) }
     func startTunnel() async throws -> CommandResult {
+        try await ensureSelectedImageAvailable()
         try await ensureDataVolume()
         return try await compose(Self.startTunnelArguments())
     }
     func restartTunnel() async throws -> CommandResult { try await compose(Self.restartTunnelArguments()) }
     func applyPasswordChange(includeTunnel: Bool) async throws -> CommandResult {
+        try await ensureSelectedImageAvailable()
         try await ensureDataVolume()
         return try await compose(Self.applyPasswordChangeArguments(includeTunnel: includeTunnel))
+    }
+
+    func selectedImageAvailable() async throws -> Bool {
+        let result = try await run(["image", "inspect", environmentValues.image])
+        return result.exitCode == 0
     }
 
     func pullSelectedImage() async throws -> CommandResult {
@@ -140,6 +148,10 @@ struct DockerClient {
     private func ensureDataVolume() async throws {
         let result = try await run(["volume", "create", ManagedStack.dataVolumeName])
         guard result.exitCode == 0 else { throw DockerClientError.invalidConfiguration }
+    }
+
+    private func ensureSelectedImageAvailable() async throws {
+        guard try await selectedImageAvailable() else { throw DockerClientError.imageUnavailable }
     }
 
     func discoveredLegacyProject() async throws -> ValidatedProject? {

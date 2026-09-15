@@ -53,6 +53,13 @@ final class StatusStore: ObservableObject {
         do {
             let client = try managedClient()
             try await client.validateReady()
+            if !(try await client.selectedImageAvailable()) {
+                snapshot = .imagesMissing
+                detail = "Download the selected ClipSync version in Settings before starting the managed stack."
+                await settings.detectMigration(using: client)
+                lastUpdated = Date()
+                return
+            }
             try await updateSnapshot(client: client)
             await settings.detectMigration(using: client)
         } catch DockerClientError.daemonUnavailable, DockerClientError.executableNotFound {
@@ -98,6 +105,9 @@ final class StatusStore: ObservableObject {
         } catch DockerClientError.daemonUnavailable, DockerClientError.executableNotFound {
             snapshot = .dockerUnavailable
             detail = "Docker Desktop is not ready."
+        } catch DockerClientError.imageUnavailable {
+            snapshot = .imagesMissing
+            detail = "Download the selected ClipSync version in Settings before starting the managed stack."
         } catch {
             snapshot = .error(safeMessage(for: error))
             detail = safeMessage(for: error)
@@ -119,6 +129,7 @@ final class StatusStore: ObservableObject {
             guard try await client.stop().exitCode == 0 else { throw DockerClientError.invalidConfiguration }
             await waitForLocalHealth(client: client, expectingHealthy: false)
         case .restart:
+            guard try await client.selectedImageAvailable() else { throw DockerClientError.imageUnavailable }
             snapshot = .stopping
             detail = "Stopping active connections before restart."
             guard try await client.stop().exitCode == 0 else { throw DockerClientError.invalidConfiguration }
@@ -138,6 +149,7 @@ final class StatusStore: ObservableObject {
             guard try await client.restartTunnel().exitCode == 0 else { throw DockerClientError.invalidConfiguration }
             await waitForTunnel(client: client)
         case .rotatePassword:
+            guard try await client.selectedImageAvailable() else { throw DockerClientError.imageUnavailable }
             _ = try settings.rotatePassword()
             let newClient = try managedClient()
             snapshot = .starting

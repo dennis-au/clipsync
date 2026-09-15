@@ -2,6 +2,12 @@ import XCTest
 @testable import ClipSyncControl
 
 final class StackStatusTests: XCTestCase {
+    func testImagesMissingStateAllowsPreparation() {
+        XCTAssertEqual(StackStatus.imagesMissing.title, "Images need preparation")
+        XCTAssertTrue(StackStatus.imagesMissing.canStart)
+        XCTAssertFalse(StackStatus.imagesMissing.canStop)
+    }
+
     func testHealthyClipboardWithStoppedTunnelOffersTunnelStart() {
         let status = StackStatus.classify(
             services: .init(clipboardRunning: true, tunnelRunning: false, localHealthy: true),

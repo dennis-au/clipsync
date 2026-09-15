@@ -94,6 +94,10 @@ final class ManagedStackTests: XCTestCase {
         XCTAssertTrue(DockerClient.startStackArguments(includeTunnel: false).contains("never"))
     }
 
+    func testDefaultImageTracksCurrentStableRelease() {
+        XCTAssertEqual(ClipSyncRelease.defaultImage, "ghcr.io/dennis-au/clipsync:v0.3.5")
+    }
+
     @MainActor
     func testMigrationPreparesImagesBeforeStoppingLegacy() async throws {
         var steps: [String] = []

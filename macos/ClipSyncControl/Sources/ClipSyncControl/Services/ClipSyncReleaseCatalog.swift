@@ -2,7 +2,7 @@ import Foundation
 
 struct ClipSyncRelease: Codable, Equatable, Identifiable {
     static let repository = "dennis-au/clipsync"
-    static let defaultImage = "ghcr.io/dennis-au/clipsync:v0.3.1"
+    static let defaultImage = "ghcr.io/dennis-au/clipsync:v0.3.5"
 
     let tagName: String
     let name: String

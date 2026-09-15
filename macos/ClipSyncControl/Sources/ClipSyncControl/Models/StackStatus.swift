@@ -61,7 +61,7 @@ enum StackStatus: Equatable {
 
     var canStop: Bool {
         switch self {
-        case .starting, .stopping, .off, .needsApproval, .dockerUnavailable:
+        case .starting, .stopping, .off, .needsApproval, .dockerUnavailable, .imagesMissing:
             false
         default:
             true
