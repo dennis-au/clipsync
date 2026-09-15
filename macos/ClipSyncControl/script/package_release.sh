@@ -23,14 +23,14 @@ case "$VERSION" in
     ;;
 esac
 
-OUTPUT_DIR="$(cd "$(dirname "$OUTPUT_DIR")" && pwd)/$(basename "$OUTPUT_DIR")"
+mkdir -p "$OUTPUT_DIR"
+OUTPUT_DIR="$(cd "$OUTPUT_DIR" && pwd)"
 APP_BUNDLE="$OUTPUT_DIR/$APP_NAME.app"
 APP_CONTENTS="$APP_BUNDLE/Contents"
 APP_MACOS="$APP_CONTENTS/MacOS"
 APP_RESOURCES="$APP_CONTENTS/Resources"
 ZIP_PATH="$OUTPUT_DIR/$APP_NAME-$VERSION-macos-arm64.zip"
 
-mkdir -p "$OUTPUT_DIR"
 rm -rf "$APP_BUNDLE" "$ZIP_PATH"
 
 cd "$ROOT_DIR"
