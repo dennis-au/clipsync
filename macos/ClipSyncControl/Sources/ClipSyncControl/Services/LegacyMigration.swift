@@ -24,9 +24,21 @@ enum LegacyMigration {
     @MainActor
     static func prepareImagesThenStopLegacy(
         prepareImages: () async throws -> Void,
-        stopLegacy: () async throws -> CommandResult
+        stopLegacy: () async throws -> CommandResult,
+        forceStopLegacy: () async throws -> CommandResult,
+        legacyServices: () async throws -> [ComposeService]
     ) async throws {
         try await prepareImages()
-        guard try await stopLegacy().exitCode == 0 else { throw MigrationError.legacyStopFailed }
+        do {
+            _ = try await stopLegacy()
+        } catch ProcessRunnerError.timedOut {
+            // The process deadline elapsed before Docker confirmed the graceful stop.
+        }
+        if !hasRunningLegacyServices(try await legacyServices()) { return }
+
+        guard try await forceStopLegacy().exitCode == 0,
+              !hasRunningLegacyServices(try await legacyServices()) else {
+            throw MigrationError.legacyStopFailed
+        }
     }
 }

@@ -11,7 +11,9 @@ struct MenuContentView: View {
             header
             Divider()
 
-            if showStopWarning {
+            if status.startMigrationConfirmationRequired {
+                startMigrationConfirmation
+            } else if showStopWarning {
                 stopConfirmation
             } else {
                 serviceControls
@@ -137,6 +139,25 @@ struct MenuContentView: View {
             MenuActionRow(title: "Stop ClipSync & Tunnel", symbolName: "stop.fill", isDestructive: true) {
                 showStopWarning = false
                 status.stop()
+            }
+        }
+        .padding(.vertical, 11)
+    }
+
+    private var startMigrationConfirmation: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            sectionTitle("Migrate Legacy ClipSync?")
+            Text("The existing ClipSync services will be stopped before the managed stack starts. If normal shutdown fails, only legacy clipboard and tunnel containers are force-stopped. Room data is preserved, and legacy services are restarted if managed startup fails.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.horizontal, 7)
+                .padding(.bottom, 6)
+            MenuActionRow(title: "Cancel", symbolName: "xmark") {
+                status.cancelStartMigration()
+            }
+            MenuActionRow(title: "Migrate & Start", symbolName: "arrow.right.circle.fill", isDestructive: true) {
+                status.confirmStartMigration()
             }
         }
         .padding(.vertical, 11)

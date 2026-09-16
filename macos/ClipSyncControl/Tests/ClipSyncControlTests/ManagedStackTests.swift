@@ -88,6 +88,21 @@ final class ManagedStackTests: XCTestCase {
         )
     }
 
+    func testLegacyLifecycleCommandsTargetOnlyLegacyServices() {
+        XCTAssertEqual(
+            DockerClient.stopLegacyArguments(),
+            ["--profile", "tunnel", "stop", "--timeout", "30", "clipboard", "cloudflared"]
+        )
+        XCTAssertEqual(
+            DockerClient.forceStopLegacyArguments(),
+            ["--profile", "tunnel", "kill", "--signal", "SIGKILL", "clipboard", "cloudflared"]
+        )
+        XCTAssertEqual(
+            DockerClient.startLegacyArguments(),
+            ["--profile", "tunnel", "up", "-d", "--no-build", "clipboard", "cloudflared"]
+        )
+    }
+
     func testStableCatalogFilteringAndImageSelection() throws {
         XCTAssertTrue(ClipSyncReleaseCatalog.isStableTag("v1.2.3"))
         XCTAssertFalse(ClipSyncReleaseCatalog.isStableTag("v1.2.3-rc1"))
@@ -145,7 +160,12 @@ final class ManagedStackTests: XCTestCase {
             stopLegacy: {
                 steps.append("stop-legacy")
                 return CommandResult(exitCode: 0, standardOutput: "", standardError: "")
-            }
+            },
+            forceStopLegacy: {
+                steps.append("force-stop-legacy")
+                return CommandResult(exitCode: 0, standardOutput: "", standardError: "")
+            },
+            legacyServices: { [] }
         )
 
         XCTAssertEqual(steps, ["prepare-images", "stop-legacy"])
@@ -161,7 +181,9 @@ final class ManagedStackTests: XCTestCase {
                 stopLegacy: {
                     legacyStopAttempted = true
                     return CommandResult(exitCode: 0, standardOutput: "", standardError: "")
-                }
+                },
+                forceStopLegacy: { CommandResult(exitCode: 0, standardOutput: "", standardError: "") },
+                legacyServices: { [] }
             )
             XCTFail("Expected image preparation to stop the transition")
         } catch TestMigrationError.imagePreparationFailed {
@@ -169,6 +191,30 @@ final class ManagedStackTests: XCTestCase {
         } catch {
             XCTFail("Unexpected error: \(error)")
         }
+    }
+
+    @MainActor
+    func testMigrationForceStopsLegacyOnlyWhenGracefulStopLeavesItRunning() async throws {
+        var steps: [String] = []
+        var checks = 0
+
+        try await LegacyMigration.prepareImagesThenStopLegacy(
+            prepareImages: { steps.append("prepare-images") },
+            stopLegacy: {
+                steps.append("stop-legacy")
+                return CommandResult(exitCode: 1, standardOutput: "", standardError: "")
+            },
+            forceStopLegacy: {
+                steps.append("force-stop-legacy")
+                return CommandResult(exitCode: 0, standardOutput: "", standardError: "")
+            },
+            legacyServices: {
+                checks += 1
+                return checks == 1 ? [.init(service: "clipboard", state: "running", health: "healthy")] : []
+            }
+        )
+
+        XCTAssertEqual(steps, ["prepare-images", "stop-legacy", "force-stop-legacy"])
     }
 
     func testMigrationImagePreparationPullsOnlyRequiredVerifiedServices() {

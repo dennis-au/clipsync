@@ -13,6 +13,7 @@ final class StatusStore: ObservableObject {
     @Published private(set) var isBusy = false
     @Published private(set) var lastUpdated: Date?
     @Published private(set) var detail = "Configure ClipSync in Settings, then start the managed stack."
+    @Published private(set) var startMigrationConfirmationRequired = false
 
     private let settings: SettingsStore
     private let coordinator = StackOperationCoordinator()
@@ -26,6 +27,15 @@ final class StatusStore: ObservableObject {
     deinit { observer?.cancel() }
 
     func start() { Task { await perform(.start) } }
+    func confirmStartMigration() {
+        startMigrationConfirmationRequired = false
+        Task { await perform(.migrateLegacy) }
+    }
+    func cancelStartMigration() {
+        startMigrationConfirmationRequired = false
+        detail = "Legacy ClipSync remains running. No services were changed."
+        lastUpdated = Date()
+    }
     func stop() { Task { await perform(.stop) } }
     func restart() { Task { await perform(.restart) } }
     func startTunnel() { Task { await perform(.startTunnel) } }
@@ -102,7 +112,14 @@ final class StatusStore: ObservableObject {
                 try await client.validateReady()
                 if operation.requiresExclusiveManagedStack {
                     await settings.detectMigration(using: client)
-                    try ensureNoPendingMigration()
+                    if case .available = settings.migrationState {
+                        if operation == .start {
+                            startMigrationConfirmationRequired = true
+                            detail = "Legacy ClipSync is running. Confirm migration to switch to the managed stack."
+                            return
+                        }
+                        throw MigrationError.migrationRequired
+                    }
                 }
                 try await execute(operation, client: client)
             }
@@ -189,6 +206,9 @@ final class StatusStore: ObservableObject {
     }
 
     private func migrateLegacyStack() async throws {
+        let detectionClient = try self.managedClient()
+        try await detectionClient.validateReady()
+        await settings.detectMigration(using: detectionClient)
         guard case .available = settings.migrationState else {
             throw MigrationError.notAvailable
         }
@@ -209,7 +229,9 @@ final class StatusStore: ObservableObject {
                         throw MigrationError.imagePreparationFailed
                     }
                 },
-                stopLegacy: { try await managedClient.stopLegacy(project: legacy) }
+                stopLegacy: { try await managedClient.stopLegacy(project: legacy) },
+                forceStopLegacy: { try await managedClient.forceStopLegacy(project: legacy) },
+                legacyServices: { try await managedClient.legacyServiceStates(project: legacy) }
             )
         } catch {
             if case MigrationError.imagePreparationFailed = error {
@@ -248,11 +270,6 @@ final class StatusStore: ObservableObject {
             : "Download the selected ClipSync version in Settings before starting the managed stack."
     }
 
-    private func ensureNoPendingMigration() throws {
-        guard case .available = settings.migrationState else { return }
-        throw MigrationError.migrationRequired
-    }
-
     private func waitForLocalHealth(client: DockerClient, expectingHealthy: Bool) async {
         for _ in 0..<60 {
             if await HealthProbe.localHealthy() == expectingHealthy {
@@ -277,13 +294,39 @@ final class StatusStore: ObservableObject {
     }
 
     private func rollbackLegacy(_ legacy: ValidatedProject, managedClient: DockerClient) async -> Error? {
-        _ = try? await managedClient.stop()
+        do {
+            let stopResult = try await managedClient.stop()
+            let stillRunning = try await managedServicesRunning(managedClient)
+            if stopResult.exitCode != 0 || stillRunning {
+                guard try await managedClient.forceStop().exitCode == 0,
+                      !(try await managedServicesRunning(managedClient)) else {
+                    return MigrationError.managedStopFailed
+                }
+            }
+        } catch ProcessRunnerError.timedOut {
+            do {
+                guard try await managedClient.forceStop().exitCode == 0,
+                      !(try await managedServicesRunning(managedClient)) else {
+                    return MigrationError.managedStopFailed
+                }
+            } catch {
+                return error
+            }
+        } catch {
+            return error
+        }
         do {
             guard try await managedClient.startLegacy(project: legacy).exitCode == 0 else { return MigrationError.legacyRollbackFailed }
             detail = "Managed migration failed. The legacy ClipSync stack was restarted."
             return nil
         } catch {
             return error
+        }
+    }
+
+    private func managedServicesRunning(_ client: DockerClient) async throws -> Bool {
+        try await client.serviceStates().contains {
+            ManagedStack.managedServiceNames.contains($0.service ?? "") && $0.state == "running"
         }
     }
 
@@ -345,7 +388,7 @@ final class StatusStore: ObservableObject {
 }
 
 enum MigrationError: LocalizedError {
-    case notAvailable, migrationRequired, imagePreparationFailed, legacyStopFailed, managedHealthFailed, managedStartRolledBack, legacyRollbackFailed, rollbackFailed(String)
+    case notAvailable, migrationRequired, imagePreparationFailed, legacyStopFailed, managedHealthFailed, managedStartRolledBack, managedStopFailed, legacyRollbackFailed, rollbackFailed(String)
     var errorDescription: String? {
         switch self {
         case .notAvailable: "No compatible legacy ClipSync stack is available to migrate."
@@ -354,6 +397,7 @@ enum MigrationError: LocalizedError {
         case .legacyStopFailed: "The legacy ClipSync services could not be stopped. No managed containers were started."
         case .managedHealthFailed: "Managed ClipSync did not become healthy after migration."
         case .managedStartRolledBack: "Managed migration failed. The legacy ClipSync stack was restarted."
+        case .managedStopFailed: "Managed migration failed, and the managed services could not be stopped safely. Legacy ClipSync was not restarted."
         case .legacyRollbackFailed: "Managed migration failed and the legacy ClipSync stack could not be restarted."
         case let .rollbackFailed(message): "Managed migration failed and legacy rollback failed: \(message)"
         }

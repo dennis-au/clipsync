@@ -15,6 +15,13 @@ final class StackStatusTests: XCTestCase {
         )
     }
 
+    func testManagedStopFailureDoesNotClaimLegacyWasRestarted() {
+        XCTAssertEqual(
+            MigrationError.managedStopFailed.errorDescription,
+            "Managed migration failed, and the managed services could not be stopped safely. Legacy ClipSync was not restarted."
+        )
+    }
+
     func testHealthyClipboardWithStoppedTunnelOffersTunnelStart() {
         let status = StackStatus.classify(
             services: .init(clipboardRunning: true, tunnelRunning: false, localHealthy: true),

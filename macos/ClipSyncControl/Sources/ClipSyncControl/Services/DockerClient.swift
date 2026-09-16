@@ -62,6 +62,7 @@ private struct DockerNetworkInspection: Decodable {
 
 struct DockerClient {
     static let gracefulStopTimeout: TimeInterval = 45
+    static let legacyServiceNames = ["clipboard", "cloudflared"]
 
     private let stack: ManagedStack
     private let executable: URL
@@ -217,9 +218,17 @@ struct DockerClient {
     func stopLegacy(project: ValidatedProject) async throws -> CommandResult {
         let context = try await localContext()
         return try await run(
-            Self.legacyComposeArguments(project: project, context: context, action: ["--profile", "tunnel", "stop", "--timeout", "30"]),
+            Self.legacyComposeArguments(project: project, context: context, action: Self.stopLegacyArguments()),
             currentDirectory: project.directory,
             timeout: 45
+        )
+    }
+
+    func forceStopLegacy(project: ValidatedProject) async throws -> CommandResult {
+        let context = try await localContext()
+        return try await run(
+            Self.legacyComposeArguments(project: project, context: context, action: Self.forceStopLegacyArguments()),
+            currentDirectory: project.directory
         )
     }
 
@@ -236,7 +245,7 @@ struct DockerClient {
     func startLegacy(project: ValidatedProject) async throws -> CommandResult {
         let context = try await localContext()
         return try await run(
-            Self.legacyComposeArguments(project: project, context: context, action: ["--profile", "tunnel", "up", "-d", "--no-build"]),
+            Self.legacyComposeArguments(project: project, context: context, action: Self.startLegacyArguments()),
             currentDirectory: project.directory,
             timeout: 90
         )
@@ -259,6 +268,15 @@ struct DockerClient {
     }
     static func forceStopStackArguments() -> [String] {
         ["--profile", "tunnel", "kill", "--signal", "SIGKILL"] + ManagedStack.managedServiceNames
+    }
+    static func stopLegacyArguments() -> [String] {
+        ["--profile", "tunnel", "stop", "--timeout", "30"] + legacyServiceNames
+    }
+    static func forceStopLegacyArguments() -> [String] {
+        ["--profile", "tunnel", "kill", "--signal", "SIGKILL"] + legacyServiceNames
+    }
+    static func startLegacyArguments() -> [String] {
+        ["--profile", "tunnel", "up", "-d", "--no-build"] + legacyServiceNames
     }
     static func startTunnelArguments() -> [String] { ["--profile", "tunnel", "up", "-d", "--no-build", ManagedStack.tunnelService] }
     static func restartTunnelArguments() -> [String] { ["--profile", "tunnel", "restart", ManagedStack.tunnelService] }
