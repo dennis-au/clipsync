@@ -15,7 +15,9 @@ struct ProjectApproval: Codable, Equatable {
 
 struct ValidatedProject {
     let directory: URL
-    let composeFile: URL
+    let composeFiles: [URL]
     let environmentFile: URL
     let fingerprint: ProjectFingerprint
+
+    var composeFile: URL { composeFiles[0] }
 }

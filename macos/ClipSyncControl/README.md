@@ -2,9 +2,11 @@
 
 ClipSync Control is a menu-bar utility that manages a private ClipSync Docker Compose workspace while continuing to rely on Docker Desktop.
 
-The app stores its Compose resource in `~/Library/Application Support/ClipSync`, uses the fixed `clipsync` Compose project, and keeps the existing `clipsync_clipboard-data` Docker volume external. Start, stop, restart, password rotation, and room-data actions never run `down -v`, remove a Docker volume, or prune Docker resources.
+The app stores its Compose resource in `~/Library/Application Support/ClipSync`, uses the fixed `clipsync-managed` Compose project, and keeps the existing `clipsync_clipboard-data` Docker volume external. Its `clipboard` and `cloudflared` services carry explicit controller-owner and role labels. Start, stop, restart, password rotation, and room-data actions never run `down -v`, remove a Docker volume, or prune Docker resources.
 
-On first migration, the app explicitly imports the legacy deployment password into the macOS Keychain, stops legacy containers, then launches distinct `managed-clipboard` and `managed-cloudflared` services against the existing data volume. The old repository and containers are kept available for rollback.
+On first migration, the app explicitly imports the legacy deployment password into the macOS Keychain, stops legacy containers using every Compose file recorded in Docker's project labels, then launches the managed services against the existing data volume. The old repository is kept available for rollback.
+
+Before any operation that can start or recreate a service, the controller inspects every running container that mounts `clipsync_clipboard-data`. It refuses to start when an unknown container owns the volume. The v0.3.9 controller stack is recognized only by its exact Compose labels, workspace, and config path; those exact predecessor containers are stopped and removed by ID during adoption. While the app is running, the same ownership check runs every 20 seconds. If another writer appears beside the managed clipboard, the controller stops only its labeled tunnel and clipboard, in that order, and leaves the other container unchanged.
 
 The Room Data settings pane lists every non-empty room in the local service. Rooms can be selected individually or in a batch and permanently deleted after an explicit confirmation. A separate force-delete action removes every room and incomplete upload. Room names and the deployment password remain local to the controller.
 Administrative requests run through `docker compose exec` against the managed clipboard

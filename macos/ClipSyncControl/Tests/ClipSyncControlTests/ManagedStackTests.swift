@@ -7,8 +7,11 @@ final class ManagedStackTests: XCTestCase {
         let stack = try preparedStack()
         let compose = try String(contentsOf: stack.composeFile, encoding: .utf8)
 
-        XCTAssertTrue(compose.contains("managed-clipboard:"))
-        XCTAssertTrue(compose.contains("managed-cloudflared:"))
+        XCTAssertTrue(compose.contains("  clipboard:"))
+        XCTAssertTrue(compose.contains("  cloudflared:"))
+        XCTAssertTrue(compose.contains("io.clipsync.control.owner: ClipSyncControl"))
+        XCTAssertTrue(compose.contains("io.clipsync.control.role: clipboard"))
+        XCTAssertTrue(compose.contains("io.clipsync.control.role: tunnel"))
         XCTAssertTrue(compose.contains("external: true"))
         XCTAssertTrue(compose.contains("name: clipsync_clipboard-data"))
         XCTAssertTrue(compose.contains("127.0.0.1:8788:8787"))
@@ -72,7 +75,7 @@ final class ManagedStackTests: XCTestCase {
             XCTAssertFalse(arguments.contains("-v"))
             XCTAssertFalse(arguments.contains("rm"))
             XCTAssertFalse(arguments.contains("prune"))
-            XCTAssertTrue(arguments.joined(separator: " ").contains("--project-name clipsync") || arguments == DockerClient.stopStackArguments() || arguments == DockerClient.forceStopStackArguments() || arguments == DockerClient.startStackArguments(includeTunnel: false) || arguments == DockerClient.applyPasswordChangeArguments(includeTunnel: true))
+            XCTAssertTrue(arguments.joined(separator: " ").contains("--project-name clipsync-managed") || arguments == DockerClient.stopStackArguments() || arguments == DockerClient.forceStopStackArguments() || arguments == DockerClient.startStackArguments(includeTunnel: false) || arguments == DockerClient.applyPasswordChangeArguments(includeTunnel: true))
         }
     }
 
@@ -80,11 +83,11 @@ final class ManagedStackTests: XCTestCase {
         XCTAssertGreaterThan(DockerClient.gracefulStopTimeout, 30)
         XCTAssertEqual(
             DockerClient.stopStackArguments(),
-            ["--profile", "tunnel", "stop", "--timeout", "30", "managed-clipboard", "managed-cloudflared"]
+            ["--profile", "tunnel", "stop", "--timeout", "30", "clipboard", "cloudflared"]
         )
         XCTAssertEqual(
             DockerClient.forceStopStackArguments(),
-            ["--profile", "tunnel", "kill", "--signal", "SIGKILL", "managed-clipboard", "managed-cloudflared"]
+            ["--profile", "tunnel", "kill", "--signal", "SIGKILL", "clipboard", "cloudflared"]
         )
     }
 
@@ -112,8 +115,213 @@ final class ManagedStackTests: XCTestCase {
     }
 
     func testLegacyProjectDiscoveryUsesDockerLabelsNotAHostSpecificPath() {
-        let output = "/Users/other/project/clipsync|/Users/other/project/clipsync/compose.yaml\n/Users/other/project/clipsync|/Users/other/project/clipsync/compose.yaml\n"
+        let output = "/Users/other/project/clipsync|/Users/other/project/clipsync/compose.yaml,/Users/other/project/clipsync/compose.cloudflare-tunnel.example.yaml\n/Users/other/project/clipsync|/Users/other/project/clipsync/compose.yaml,/Users/other/project/clipsync/compose.cloudflare-tunnel.example.yaml\n"
         XCTAssertEqual(DockerClient.legacyProjectPaths(from: output), ["/Users/other/project/clipsync"])
+        XCTAssertEqual(DockerClient.legacyProjectReferences(from: output), [
+            .init(
+                directory: "/Users/other/project/clipsync",
+                composeFiles: [
+                    "/Users/other/project/clipsync/compose.yaml",
+                    "/Users/other/project/clipsync/compose.cloudflare-tunnel.example.yaml",
+                ]
+            ),
+        ])
+    }
+
+    func testContainerInspectionClassifiesOnlyExactManagedAndUpgradeOwners() throws {
+        let stack = ManagedStack(workspace: URL(fileURLWithPath: "/Users/test/Library/Application Support/ClipSync"))
+        let current = containerInspectionJSON(
+            id: "current-id",
+            name: "/clipsync-managed-clipboard-1",
+            labels: [
+                ManagedStack.ownershipLabel: ManagedStack.ownershipValue,
+                ManagedStack.roleLabel: "clipboard",
+                "com.docker.compose.project": ManagedStack.projectName,
+                "com.docker.compose.service": ManagedStack.clipboardService,
+                "com.docker.compose.project.working_dir": stack.workspace.path,
+                "com.docker.compose.project.config_files": stack.composeFile.path,
+            ]
+        )
+        let previous = containerInspectionJSON(
+            id: "previous-id",
+            name: "/clipsync-managed-clipboard-1-old",
+            labels: [
+                "com.docker.compose.project": ManagedStack.previousProjectName,
+                "com.docker.compose.service": "managed-clipboard",
+                "com.docker.compose.project.working_dir": stack.workspace.path,
+                "com.docker.compose.project.config_files": stack.composeFile.path,
+            ]
+        )
+        let foreign = containerInspectionJSON(
+            id: "foreign-id",
+            name: "/legacy-clipboard",
+            labels: ["com.docker.compose.project": "clipsync"]
+        )
+
+        let decoded = try ContainerOwnership.decodeInspections("[\(current),\(previous),\(foreign)]")
+        let audit = ContainerOwnership.audit(decoded, stack: stack)
+
+        XCTAssertEqual(audit.currentManaged.map(\.id), ["current-id"])
+        XCTAssertEqual(audit.upgradeCompatible.map(\.id), ["previous-id"])
+        XCTAssertEqual(audit.foreign.map(\.id), ["foreign-id"])
+    }
+
+    func testUpgradeCompatibilityRequiresExactWorkspaceAndComposePath() throws {
+        let stack = ManagedStack(workspace: URL(fileURLWithPath: "/Users/test/Library/Application Support/ClipSync"))
+        let wrongWorkspace = containerInspectionJSON(
+            id: "wrong",
+            name: "/wrong",
+            labels: [
+                "com.docker.compose.project": ManagedStack.previousProjectName,
+                "com.docker.compose.service": "managed-clipboard",
+                "com.docker.compose.project.working_dir": "/tmp/not-clipsync-control",
+                "com.docker.compose.project.config_files": stack.composeFile.path,
+            ]
+        )
+        let decoded = try ContainerOwnership.decodeInspections("[\(wrongWorkspace)]")
+
+        XCTAssertEqual(ContainerOwnership.audit(decoded, stack: stack).foreign.map(\.id), ["wrong"])
+    }
+
+    func testOwnershipDecisionsRefuseUnknownAndFailClosedDuringSplitBrain() throws {
+        let stack = ManagedStack(workspace: URL(fileURLWithPath: "/Users/test/Library/Application Support/ClipSync"))
+        let currentJSON = containerInspectionJSON(
+            id: "current",
+            name: "/clipsync-managed-clipboard-1",
+            labels: [
+                ManagedStack.ownershipLabel: ManagedStack.ownershipValue,
+                ManagedStack.roleLabel: "clipboard",
+                "com.docker.compose.project": ManagedStack.projectName,
+                "com.docker.compose.service": ManagedStack.clipboardService,
+                "com.docker.compose.project.working_dir": stack.workspace.path,
+                "com.docker.compose.project.config_files": stack.composeFile.path,
+            ]
+        )
+        let foreignJSON = containerInspectionJSON(
+            id: "foreign",
+            name: "/foreign-writer",
+            labels: [:]
+        )
+        let previousJSON = containerInspectionJSON(
+            id: "previous",
+            name: "/previous-controller",
+            labels: [
+                "com.docker.compose.project": ManagedStack.previousProjectName,
+                "com.docker.compose.service": "managed-clipboard",
+                "com.docker.compose.project.working_dir": stack.workspace.path,
+                "com.docker.compose.project.config_files": stack.composeFile.path,
+            ]
+        )
+        let current = try ContainerOwnership.decodeInspections("[\(currentJSON)]")[0]
+        let foreign = try ContainerOwnership.decodeInspections("[\(foreignJSON)]")[0]
+        let previous = try ContainerOwnership.decodeInspections("[\(previousJSON)]")[0]
+
+        let foreignOnly = ContainerOwnership.audit([foreign], stack: stack)
+        XCTAssertEqual(ContainerOwnership.startDecision(for: foreignOnly), .refuse("foreign-writer"))
+        XCTAssertEqual(ContainerOwnership.runtimeDecision(for: foreignOnly), .refuse("foreign-writer"))
+
+        let splitBrain = ContainerOwnership.audit([current, foreign], stack: stack)
+        XCTAssertEqual(ContainerOwnership.startDecision(for: splitBrain), .failClosed("foreign-writer"))
+        XCTAssertEqual(ContainerOwnership.runtimeDecision(for: splitBrain), .failClosed("foreign-writer"))
+        XCTAssertEqual(ContainerOwnership.postStartDecision(for: splitBrain), .failClosed("foreign-writer"))
+
+        let predecessorOnly = ContainerOwnership.audit([previous], stack: stack)
+        XCTAssertEqual(ContainerOwnership.startDecision(for: predecessorOnly), .adoptPrevious)
+        XCTAssertEqual(ContainerOwnership.runtimeDecision(for: predecessorOnly), .allow)
+    }
+
+    func testOwnershipCommandsAreScopedToExactContainersAndNeverVolumes() {
+        let commands = [
+            DockerClient.stopContainerArguments(id: "container-id"),
+            DockerClient.killContainerArguments(id: "container-id"),
+            DockerClient.removeContainerArguments(id: "container-id"),
+        ]
+
+        XCTAssertEqual(commands[0], ["container", "stop", "--time", "30", "container-id"])
+        XCTAssertEqual(commands[1], ["container", "kill", "--signal", "SIGKILL", "container-id"])
+        XCTAssertEqual(commands[2], ["container", "rm", "container-id"])
+        for command in commands {
+            XCTAssertFalse(command.contains("-v"))
+            XCTAssertFalse(command.contains("volume"))
+            XCTAssertFalse(command.contains("prune"))
+            XCTAssertFalse(command.contains("down"))
+        }
+    }
+
+    func testOwnershipDiscoveryUsesSharedVolumeAndExplicitLabels() {
+        XCTAssertEqual(
+            DockerClient.runningVolumeContainerIDsArguments(),
+            ["container", "ls", "--filter", "volume=clipsync_clipboard-data", "--format", "{{.ID}}"]
+        )
+        XCTAssertEqual(
+            DockerClient.ownedManagedContainerIDsArguments(),
+            ["container", "ls", "--filter", "label=io.clipsync.control.owner=ClipSyncControl", "--format", "{{.ID}}"]
+        )
+        XCTAssertTrue(DockerClient.previousManagedContainerIDsArguments().contains("--all"))
+    }
+
+    func testFailClosedAttemptsClipboardAfterTunnelStopFails() async throws {
+        let tunnelJSON = containerInspectionJSON(
+            id: "tunnel",
+            name: "/tunnel",
+            labels: [ManagedStack.roleLabel: "tunnel"]
+        )
+        let clipboardJSON = containerInspectionJSON(
+            id: "clipboard",
+            name: "/clipboard",
+            labels: [ManagedStack.roleLabel: "clipboard"]
+        )
+        let tunnel = try ContainerOwnership.decodeInspections("[\(tunnelJSON)]")[0]
+        let clipboard = try ContainerOwnership.decodeInspections("[\(clipboardJSON)]")[0]
+        var attempts: [String] = []
+
+        let succeeded = await DockerClient.attemptAllOwnedStops([clipboard, tunnel]) { container in
+            attempts.append(container.id)
+            if container.id == "tunnel" { throw TestMigrationError.stopFailed }
+        }
+
+        XCTAssertFalse(succeeded)
+        XCTAssertEqual(attempts, ["tunnel", "clipboard"])
+    }
+
+    func testStartAttemptAuditsNonzeroAndThrownComposeResults() async throws {
+        var nonzeroAudits: [Bool] = []
+        let nonzero = try await DockerClient.performStartAttempt(
+            action: { CommandResult(exitCode: 1, standardOutput: "", standardError: "failed") },
+            postAttempt: { nonzeroAudits.append($0) }
+        )
+        XCTAssertEqual(nonzero.exitCode, 1)
+        XCTAssertEqual(nonzeroAudits, [false])
+
+        var thrownAudits: [Bool] = []
+        do {
+            _ = try await DockerClient.performStartAttempt(
+                action: { throw TestMigrationError.startFailed },
+                postAttempt: { thrownAudits.append($0) }
+            )
+            XCTFail("Expected original start error")
+        } catch TestMigrationError.startFailed {
+            XCTAssertEqual(thrownAudits, [false])
+        }
+    }
+
+    @MainActor
+    func testLegacyRollbackDoesNotStartWhenVolumeCannotBeConfirmedUnowned() async {
+        var startAttempted = false
+        do {
+            _ = try await LegacyMigration.restartLegacyWhenSafe(
+                confirmVolumeUnowned: { throw TestMigrationError.volumeStillOwned },
+                startLegacy: {
+                    startAttempted = true
+                    return CommandResult(exitCode: 0, standardOutput: "", standardError: "")
+                }
+            )
+            XCTFail("Expected rollback safety failure")
+        } catch TestMigrationError.volumeStillOwned {
+            XCTAssertFalse(startAttempted)
+        } catch {
+            XCTFail("Unexpected error: \(error)")
+        }
     }
 
     func testMigrationOnlyBlocksWhileLegacyServicesAreRunning() {
@@ -278,8 +486,26 @@ final class ManagedStackTests: XCTestCase {
         addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
         return stack
     }
+
+    private func containerInspectionJSON(
+        id: String,
+        name: String,
+        labels: [String: String],
+        running: Bool = true,
+        volume: String = ManagedStack.dataVolumeName
+    ) -> String {
+        let object: [String: Any] = [
+            "Id": id,
+            "Name": name,
+            "State": ["Running": running],
+            "Config": ["Labels": labels],
+            "Mounts": [["Type": "volume", "Name": volume, "Destination": "/var/lib/clipsync"]],
+        ]
+        let data = try! JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+        return String(decoding: data, as: UTF8.self)
+    }
 }
 
 private enum TestMigrationError: Error {
-    case imagePreparationFailed
+    case imagePreparationFailed, stopFailed, startFailed, volumeStillOwned
 }

@@ -63,6 +63,7 @@ final class StatusStore: ObservableObject {
         do {
             let client = try managedClient()
             try await client.validateReady()
+            try await client.enforceRuntimeOwnership()
             if !(try await client.requiredImagesAvailable(includeTunnel: settings.hasTunnelToken)) {
                 snapshot = .imagesMissing
                 detail = missingImagesDetail
@@ -180,6 +181,7 @@ final class StatusStore: ObservableObject {
             await waitForTunnel(client: client)
         case .rotatePassword:
             guard try await client.requiredImagesAvailable(includeTunnel: settings.hasTunnelToken) else { throw DockerClientError.imageUnavailable }
+            try await client.prepareForManagedStart()
             _ = try settings.rotatePassword()
             let newClient = try managedClient()
             snapshot = .starting
@@ -316,7 +318,11 @@ final class StatusStore: ObservableObject {
             return error
         }
         do {
-            guard try await managedClient.startLegacy(project: legacy).exitCode == 0 else { return MigrationError.legacyRollbackFailed }
+            let startResult = try await LegacyMigration.restartLegacyWhenSafe(
+                confirmVolumeUnowned: { try await managedClient.ensureVolumeUnownedForLegacyRollback() },
+                startLegacy: { try await managedClient.startLegacy(project: legacy) }
+            )
+            guard startResult.exitCode == 0 else { return MigrationError.legacyRollbackFailed }
             detail = "Managed migration failed. The legacy ClipSync stack was restarted."
             return nil
         } catch {

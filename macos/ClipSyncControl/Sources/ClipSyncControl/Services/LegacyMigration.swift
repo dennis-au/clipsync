@@ -8,17 +8,38 @@ enum LegacyMigrationState: Equatable {
 }
 
 enum LegacyMigration {
-    static func detect(client: DockerClient, legacyPath: String) async throws -> LegacyMigrationState {
+    static func detect(client: DockerClient, project: ValidatedProject?) async throws -> LegacyMigrationState {
+        guard let project else { return .notNeeded }
         guard try await client.volumeExists(ManagedStack.dataVolumeName) else { return .notNeeded }
-        guard let project = try? ProjectValidator.validate(projectPath: legacyPath) else { return .notNeeded }
-        guard hasRunningLegacyServices(try await client.legacyServiceStates(project: project)) else { return .notNeeded }
-        return .available(projectPath: legacyPath)
+        return detect(
+            volumeExists: true,
+            project: project,
+            services: try await client.legacyServiceStates(project: project)
+        )
+    }
+
+    static func detect(
+        volumeExists: Bool,
+        project: ValidatedProject?,
+        services: [ComposeService]
+    ) -> LegacyMigrationState {
+        guard volumeExists, let project, hasRunningLegacyServices(services) else { return .notNeeded }
+        return .available(projectPath: project.directory.path)
     }
 
     static func hasRunningLegacyServices(_ services: [ComposeService]) -> Bool {
         services.contains { service in
             (service.service == "clipboard" || service.service == "cloudflared") && service.state == "running"
         }
+    }
+
+    @MainActor
+    static func restartLegacyWhenSafe(
+        confirmVolumeUnowned: () async throws -> Void,
+        startLegacy: () async throws -> CommandResult
+    ) async throws -> CommandResult {
+        try await confirmVolumeUnowned()
+        return try await startLegacy()
     }
 
     @MainActor

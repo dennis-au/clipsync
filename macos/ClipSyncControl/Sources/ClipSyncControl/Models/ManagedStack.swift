@@ -1,14 +1,18 @@
 import Foundation
 
 struct ManagedStack: Equatable {
-    static let projectName = "clipsync"
+    static let projectName = "clipsync-managed"
+    static let previousProjectName = "clipsync"
     static let dataVolumeName = "clipsync_clipboard-data"
     static let managedNetworkName = "clipsync-control-managed"
     static let managedNetworkOwnershipLabel = "io.clipsync.control.managed"
     static let managedNetworkOwnershipValue = "true"
-    static let clipboardService = "managed-clipboard"
-    static let tunnelService = "managed-cloudflared"
+    static let clipboardService = "clipboard"
+    static let tunnelService = "cloudflared"
     static let managedServiceNames = [clipboardService, tunnelService]
+    static let ownershipLabel = "io.clipsync.control.owner"
+    static let ownershipValue = "ClipSyncControl"
+    static let roleLabel = "io.clipsync.control.role"
     static let tunnelImage = "cloudflare/cloudflared:2026.8.2@sha256:0aa26e284f05e6c77ae375b8c9c11d9eb6a448fb7bcd8d40f31cb6176189eb38"
 
     let workspace: URL

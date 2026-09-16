@@ -14,7 +14,15 @@ final class SettingsStore: ObservableObject {
     @Published var dockerPath: String { didSet { defaults.set(dockerPath, forKey: Key.dockerPath) } }
     @Published var publicURL: String { didSet { defaults.set(publicURL, forKey: Key.publicURL) } }
     @Published var selectedImage: String { didSet { defaults.set(selectedImage, forKey: Key.selectedImage) } }
-    @Published var legacyProjectPath: String { didSet { defaults.set(legacyProjectPath, forKey: Key.legacyProjectPath) } }
+    @Published var legacyProjectPath: String {
+        didSet {
+            defaults.set(legacyProjectPath, forKey: Key.legacyProjectPath)
+            if legacyProjectPath != discoveredLegacyProjectPath {
+                discoveredLegacyProjectPath = nil
+                discoveredLegacyComposeFiles = []
+            }
+        }
+    }
     @Published private(set) var setupMessage = "ClipSync Control manages its own private Docker Compose workspace."
     @Published private(set) var availableReleases: [ClipSyncRelease] = []
     @Published private(set) var isLoadingReleases = false
@@ -24,6 +32,8 @@ final class SettingsStore: ObservableObject {
     let stack: ManagedStack
     let secrets: KeychainSecretStore
     private let defaults: UserDefaults
+    private var discoveredLegacyProjectPath: String?
+    private var discoveredLegacyComposeFiles: [String] = []
 
     init(
         defaults: UserDefaults = .standard,
@@ -117,8 +127,9 @@ final class SettingsStore: ObservableObject {
     func detectMigration(using client: DockerClient) async {
         do {
             let discovered = try await client.discoveredLegacyProject()
-            if let discovered { legacyProjectPath = discovered.directory.path }
-            migrationState = try await LegacyMigration.detect(client: client, legacyPath: legacyProjectPath)
+            if let discovered { recordDiscoveredLegacyProject(discovered) }
+            let project = try? validatedLegacyProject()
+            migrationState = try await LegacyMigration.detect(client: client, project: project)
             downloadedImages = try await client.downloadedClipSyncImages()
             saveDownloadedImages()
         } catch {
@@ -127,13 +138,24 @@ final class SettingsStore: ObservableObject {
     }
 
     func importLegacyCredentials() throws -> ValidatedProject {
-        let project = try ProjectValidator.validate(projectPath: legacyProjectPath)
+        let project = try validatedLegacyProject()
         let password = try ClipSyncPasswordStore.currentPassword(in: project)
         try secrets.set(password, for: .password)
         if let token = try ClipSyncPasswordStore.currentTunnelToken(in: project) {
             try secrets.set(token, for: .tunnelToken)
         }
         return project
+    }
+
+    func recordDiscoveredLegacyProject(_ project: ValidatedProject) {
+        legacyProjectPath = project.directory.path
+        discoveredLegacyProjectPath = project.directory.path
+        discoveredLegacyComposeFiles = project.composeFiles.map(\.path)
+    }
+
+    func validatedLegacyProject() throws -> ValidatedProject {
+        let composeFiles = discoveredLegacyProjectPath == legacyProjectPath ? discoveredLegacyComposeFiles : []
+        return try ProjectValidator.validate(projectPath: legacyProjectPath, configFilePaths: composeFiles)
     }
 
     func markMigrated() { setupMessage = "Legacy services were stopped. Managed ClipSync now uses the existing room-data volume." }

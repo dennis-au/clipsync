@@ -22,13 +22,13 @@ enum ProjectValidationError: LocalizedError {
         case .unexpectedOwner(let url):
             "\(url.lastPathComponent) must be owned by the signed-in macOS user."
         case .invalidCompose:
-            "compose.yaml must define the clipboard and cloudflared services."
+            "The approved Compose files must define the clipboard and cloudflared services."
         }
     }
 }
 
 enum ProjectValidator {
-    static func validate(projectPath: String) throws -> ValidatedProject {
+    static func validate(projectPath: String, configFilePaths: [String] = []) throws -> ValidatedProject {
         guard projectPath.hasPrefix("/") else {
             throw ProjectValidationError.invalidPath
         }
@@ -40,24 +40,39 @@ enum ProjectValidator {
         }
         try validateDirectory(directory)
 
-        let composeFile = directory.appendingPathComponent("compose.yaml")
+        let composeFiles = try validatedComposeFiles(directory: directory, configFilePaths: configFilePaths)
         let environmentFile = directory.appendingPathComponent(".env")
         let dockerfile = directory.appendingPathComponent("Dockerfile")
-        try validateOwnedRegularFile(composeFile)
+        for composeFile in composeFiles { try validateOwnedRegularFile(composeFile) }
         try validateOwnedRegularFile(environmentFile)
         try validateOwnedRegularFile(dockerfile)
 
-        let compose = try String(contentsOf: composeFile, encoding: .utf8)
+        let compose = try composeFiles.map { try String(contentsOf: $0, encoding: .utf8) }.joined(separator: "\n")
         guard compose.contains("clipboard:") && compose.contains("cloudflared:") else {
             throw ProjectValidationError.invalidCompose
         }
 
         return ValidatedProject(
             directory: directory,
-            composeFile: composeFile,
+            composeFiles: composeFiles,
             environmentFile: environmentFile,
-            fingerprint: try fingerprint(composeFile: composeFile, environmentFile: environmentFile)
+            fingerprint: try fingerprint(composeFiles: composeFiles, environmentFile: environmentFile)
         )
+    }
+
+    private static func validatedComposeFiles(directory: URL, configFilePaths: [String]) throws -> [URL] {
+        let paths = configFilePaths.isEmpty ? [directory.appendingPathComponent("compose.yaml").path] : configFilePaths
+        var seen = Set<String>()
+        return try paths.compactMap { path in
+            guard path.hasPrefix("/") else { throw ProjectValidationError.invalidPath }
+            let original = URL(fileURLWithPath: path).standardizedFileURL
+            let resolved = original.resolvingSymlinksInPath()
+            guard original.path == resolved.path else { throw ProjectValidationError.symlink(original) }
+            let directoryPrefix = directory.path.hasSuffix("/") ? directory.path : directory.path + "/"
+            guard resolved.path.hasPrefix(directoryPrefix) else { throw ProjectValidationError.invalidPath }
+            guard seen.insert(resolved.path).inserted else { return nil }
+            return resolved
+        }
     }
 
     private static func validateDirectory(_ url: URL) throws {
@@ -98,12 +113,12 @@ enum ProjectValidator {
         }
     }
 
-    private static func fingerprint(composeFile: URL, environmentFile: URL) throws -> ProjectFingerprint {
-        let compose = try attributes(for: composeFile)
+    private static func fingerprint(composeFiles: [URL], environmentFile: URL) throws -> ProjectFingerprint {
+        let composeAttributes = try composeFiles.map(attributes(for:))
         let environment = try attributes(for: environmentFile)
         return ProjectFingerprint(
-            composeModifiedAt: compose.modifiedAt,
-            composeSize: compose.size,
+            composeModifiedAt: composeAttributes.map(\.modifiedAt).max() ?? 0,
+            composeSize: composeAttributes.reduce(0) { $0 + $1.size },
             envModifiedAt: environment.modifiedAt,
             envSize: environment.size
         )

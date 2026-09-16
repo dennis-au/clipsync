@@ -27,6 +27,103 @@ final class ProjectValidatorTests: XCTestCase {
         XCTAssertEqual(validated.composeFile.lastPathComponent, "compose.yaml")
     }
 
+    func testValidatorPreservesEveryDockerReportedComposeFile() throws {
+        let project = try makeProject()
+        let base = project.appendingPathComponent("compose.yaml")
+        let overlay = project.appendingPathComponent("compose.cloudflare-tunnel.example.yaml")
+        try "services:\n  clipboard:\n".write(to: base, atomically: true, encoding: .utf8)
+        try "services:\n  cloudflared:\n".write(to: overlay, atomically: true, encoding: .utf8)
+        XCTAssertEqual(chmod(base.path, 0o600), 0)
+        XCTAssertEqual(chmod(overlay.path, 0o600), 0)
+
+        let validated = try ProjectValidator.validate(
+            projectPath: project.path,
+            configFilePaths: [base.path, overlay.path]
+        )
+        let arguments = DockerClient.legacyComposeArguments(
+            project: validated,
+            context: "desktop-linux",
+            action: DockerClient.stopLegacyArguments()
+        )
+
+        XCTAssertEqual(validated.composeFiles, [base, overlay])
+        XCTAssertEqual(arguments.filter { $0 == "-f" }.count, 2)
+        XCTAssertTrue(arguments.joined(separator: " ").contains("--project-name clipsync"))
+        XCTAssertFalse(arguments.joined(separator: " ").contains("--project-name clipsync-managed"))
+        XCTAssertTrue(arguments.contains(base.path))
+        XCTAssertTrue(arguments.contains(overlay.path))
+    }
+
+    @MainActor
+    func testSettingsRetainsDiscoveredOverlayThroughMigrationDetectionAndLifecycle() throws {
+        let project = try makeProject()
+        let base = project.appendingPathComponent("compose.yaml")
+        let overlay = project.appendingPathComponent("compose.cloudflare-tunnel.example.yaml")
+        try "services:\n  clipboard:\n".write(to: base, atomically: true, encoding: .utf8)
+        try "services:\n  cloudflared:\n".write(to: overlay, atomically: true, encoding: .utf8)
+        XCTAssertEqual(chmod(base.path, 0o600), 0)
+        XCTAssertEqual(chmod(overlay.path, 0o600), 0)
+        let discovered = try ProjectValidator.validate(
+            projectPath: project.path,
+            configFilePaths: [base.path, overlay.path]
+        )
+        let suiteName = "ClipSyncControlTests.\(UUID().uuidString)"
+        let defaults = try XCTUnwrap(UserDefaults(suiteName: suiteName))
+        let workspace = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let settings = SettingsStore(defaults: defaults, stack: ManagedStack(workspace: workspace))
+        addTeardownBlock {
+            defaults.removePersistentDomain(forName: suiteName)
+            try? FileManager.default.removeItem(at: workspace)
+        }
+
+        settings.recordDiscoveredLegacyProject(discovered)
+        let retained = try settings.validatedLegacyProject()
+        let state = LegacyMigration.detect(
+            volumeExists: true,
+            project: retained,
+            services: [.init(service: "clipboard", state: "running", health: "healthy")]
+        )
+        let arguments = DockerClient.legacyComposeArguments(
+            project: retained,
+            context: "desktop-linux",
+            action: DockerClient.stopLegacyArguments()
+        )
+
+        XCTAssertEqual(state, .available(projectPath: project.path))
+        XCTAssertEqual(retained.composeFiles, [base, overlay])
+        XCTAssertEqual(arguments.filter { $0 == "-f" }.count, 2)
+        XCTAssertTrue(arguments.contains(base.path))
+        XCTAssertTrue(arguments.contains(overlay.path))
+    }
+
+    func testValidatorRejectsUnsafeReportedComposeOverlay() throws {
+        let project = try makeProject()
+        let overlay = project.appendingPathComponent("compose.cloudflare-tunnel.example.yaml")
+        try "services:\n  cloudflared:\n".write(to: overlay, atomically: true, encoding: .utf8)
+        XCTAssertEqual(chmod(overlay.path, 0o666), 0)
+
+        XCTAssertThrowsError(try ProjectValidator.validate(
+            projectPath: project.path,
+            configFilePaths: [project.appendingPathComponent("compose.yaml").path, overlay.path]
+        )) { error in
+            XCTAssertEqual(
+                (error as? ProjectValidationError)?.errorDescription,
+                "Permissions are too open for compose.cloudflare-tunnel.example.yaml."
+            )
+        }
+    }
+
+    func testValidatorRejectsReportedComposeFileOutsideProject() throws {
+        let project = try makeProject()
+
+        XCTAssertThrowsError(try ProjectValidator.validate(
+            projectPath: project.path,
+            configFilePaths: ["/tmp/foreign-compose.yaml"]
+        )) { error in
+            XCTAssertEqual((error as? ProjectValidationError)?.errorDescription, "Choose an absolute ClipSync project folder.")
+        }
+    }
+
     func testValidatorRejectsWorldWritableEnvironmentFile() throws {
         let project = try makeProject()
         let environment = project.appendingPathComponent(".env")
@@ -111,7 +208,7 @@ final class ProjectValidatorTests: XCTestCase {
         )
         XCTAssertEqual(
             DockerClient.restartTunnelArguments(),
-            ["--profile", "tunnel", "restart", ManagedStack.tunnelService]
+            ["--profile", "tunnel", "up", "-d", "--no-build", "--pull", "never", "--force-recreate", ManagedStack.tunnelService]
         )
     }
 

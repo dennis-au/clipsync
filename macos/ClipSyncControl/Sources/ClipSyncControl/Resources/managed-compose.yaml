@@ -1,7 +1,10 @@
 services:
-  managed-clipboard:
+  clipboard:
     image: ${CLIPSYNC_IMAGE:?Choose a ClipSync image before starting.}
     restart: unless-stopped
+    labels:
+      io.clipsync.control.owner: ClipSyncControl
+      io.clipsync.control.role: clipboard
     environment:
       CLIPSYNC_PASSWORD: ${CLIPSYNC_PASSWORD:?ClipSync password is required.}
       CLIPSYNC_TTL_DAYS: ${CLIPSYNC_TTL_DAYS:-30}
@@ -46,13 +49,16 @@ services:
       managed-net:
         aliases: [clipboard]
 
-  managed-cloudflared:
+  cloudflared:
     image: cloudflare/cloudflared:2026.8.2@sha256:0aa26e284f05e6c77ae375b8c9c11d9eb6a448fb7bcd8d40f31cb6176189eb38
     command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN:-not-configured}
     restart: unless-stopped
+    labels:
+      io.clipsync.control.owner: ClipSyncControl
+      io.clipsync.control.role: tunnel
     profiles: ["tunnel"]
     depends_on:
-      managed-clipboard:
+      clipboard:
         condition: service_healthy
     networks:
       - managed-net

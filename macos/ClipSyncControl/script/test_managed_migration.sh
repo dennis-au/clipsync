@@ -98,9 +98,9 @@ curl --fail --silent -H "Cookie: clip_auth=$COOKIE" "http://127.0.0.1:$LEGACY_PO
 # This is the same non-destructive legacy transition used by the controller.
 docker compose --project-name "$ID-legacy" --project-directory "$WORKSPACE" --env-file "$ENV_FILE" -f "$LEGACY_FILE" stop
 ! docker compose --project-name "$ID-legacy" --project-directory "$WORKSPACE" --env-file "$ENV_FILE" -f "$LEGACY_FILE" ps --status running --services | grep -q legacy-clipboard
-docker compose --project-name "$MANAGED_PROJECT" --project-directory "$WORKSPACE" --env-file "$ENV_FILE" -f "$MANAGED_FILE" up -d --no-build --pull never managed-clipboard
+docker compose --project-name "$MANAGED_PROJECT" --project-directory "$WORKSPACE" --env-file "$ENV_FILE" -f "$MANAGED_FILE" up -d --no-build --pull never clipboard
 wait_for_health "$MANAGED_PORT"
-MANAGED_CONTAINER="$(docker compose --project-name "$MANAGED_PROJECT" --project-directory "$WORKSPACE" --env-file "$ENV_FILE" -f "$MANAGED_FILE" ps -q managed-clipboard)"
+MANAGED_CONTAINER="$(docker compose --project-name "$MANAGED_PROJECT" --project-directory "$WORKSPACE" --env-file "$ENV_FILE" -f "$MANAGED_FILE" ps -q clipboard)"
 test -n "$MANAGED_CONTAINER"
 docker inspect "$MANAGED_CONTAINER" --format '{{range .Config.Env}}{{println .}}{{end}}' | grep -Fx "CLIPSYNC_TRUSTED_PROXY_CIDRS=$TRUSTED_PROXY_CIDRS" >/dev/null
 curl --fail --silent -H "Cookie: clip_auth=$COOKIE" "http://127.0.0.1:$MANAGED_PORT/list?room=migration-room" | grep -q 'migration room item'
